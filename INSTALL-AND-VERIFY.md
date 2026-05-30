@@ -264,6 +264,37 @@ oc get secret openshift-gitops-cluster -n openshift-gitops \
   -o jsonpath='{.data.admin\.password}' | base64 -d
 ```
 
+**CRC 資源調校 — 讓 ArgoCD 在 CPU 受限環境運行：**
+```bash
+# ArgoCD application-controller 預設 request 250m/1Gi，CRC CPU 滿載時卡 Pending
+# 調降各元件 requests（PoC 用，正式環境保持預設）
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '{
+  "spec": {
+    "controller": {"resources": {"requests": {"cpu": "50m", "memory": "512Mi"}}},
+    "repo": {"resources": {"requests": {"cpu": "50m", "memory": "256Mi"}}},
+    "applicationSet": {"resources": {"requests": {"cpu": "25m", "memory": "128Mi"}}},
+    "redis": {"resources": {"requests": {"cpu": "25m", "memory": "128Mi"}}},
+    "server": {"resources": {"requests": {"cpu": "50m", "memory": "128Mi"}}},
+    "sso": {"dex": {"resources": {"requests": {"cpu": "25m", "memory": "128Mi"}}}}
+  }
+}'
+
+# 給 cluster-admin ArgoCD UI 的 admin 權限（否則 UI 顯示 No applications）
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '{
+  "spec": {"rbac": {
+    "defaultPolicy": "role:admin",
+    "policy": "g, system:cluster-admins, role:admin\ng, cluster-admins, role:admin",
+    "scopes": "[groups,preferred_username]"
+  }}
+}'
+
+# 釋放 CPU：停用 Tekton 非必要元件（results/chains/pipelines-as-code）
+oc patch tektonconfig config --type merge -p '{
+  "spec": {"result": {"disabled": true}, "chain": {"disabled": true},
+    "platforms": {"openshift": {"pipelinesAsCode": {"enable": false}}}}
+}'
+```
+
 ---
 
 ## 7. 資源清理指令
