@@ -1537,7 +1537,73 @@ oc adm must-gather               # 收集診斷資訊
 
 以 [Spring PetClinic Microservices](https://github.com/spring-petclinic/spring-petclinic-microservices) 為範例，示範在 OpenShift 上部署完整的微服務架構。所有服務透過 **S2I 從 GitHub 原始碼建置**，展示 OpenShift 的完整 CI/CD 能力。
 
-### 微服務架構
+### Spring PetClinic 應用架構
+
+**Spring PetClinic** 是 Spring 官方的經典範例 —— 一個**寵物診所管理系統**，管理飼主、寵物、獸醫與就診記錄。微服務版將傳統單體拆分為多個獨立服務，是學習 Spring Cloud 微服務的標準教材。
+
+#### 業務領域模型
+
+```
+Owner（飼主）──── 1:N ────> Pet（寵物）──── N:1 ────> PetType（寵物種類）
+   id, firstName,            id, name,                 cat / dog / bird...
+   lastName, address,        birthDate
+   city, telephone               │
+                                  │ 1:N
+                                  ▼
+                              Visit（就診記錄）
+                              id, date, description
+
+Vet（獸醫）──── N:M ────> Specialty（專長）
+   id, firstName,            radiology / surgery
+   lastName                  dentistry...
+```
+
+#### 微服務拆分（依領域邊界）
+
+| 微服務 | Port | 業務職責 | 領域物件 | 資料庫 |
+|--------|------|---------|---------|--------|
+| **customers-service** | 8081 | 飼主與寵物管理 | Owner, Pet, PetType | HSQLDB（內嵌） |
+| **vets-service** | 8083 | 獸醫與專長管理 | Vet, Specialty | HSQLDB（內嵌） |
+| **visits-service** | 8082 | 就診記錄管理 | Visit | HSQLDB（內嵌） |
+
+> 每個微服務擁有**獨立的資料庫**（Database per Service 模式），符合微服務「資料自治」原則。
+
+#### Spring Cloud 基礎設施服務
+
+| 服務 | Port | 角色 | Spring Cloud 元件 |
+|------|------|------|------------------|
+| **config-server** | 8888 | 集中設定管理（從 Git 讀取各服務 `application.yml`） | Spring Cloud Config |
+| **discovery-server** | 8761 | 服務註冊與發現、健康監控 | Netflix Eureka |
+| **api-gateway** | 8080 | 統一入口、路由、客戶端負載均衡 | Spring Cloud Gateway |
+| **admin-server** | 9090 | 視覺化監控所有服務健康狀態 | Spring Boot Admin |
+
+#### 請求流程（以查詢獸醫為例）
+
+```
+1. 瀏覽器 → GET petclinic.apps-crc.testing/api/vet/vets
+2. API Gateway 收到請求，查 Eureka 找到 vets-service 實例位址
+3. Gateway 透過 Spring Cloud LoadBalancer 轉發到 vets-service:8083/vets
+4. vets-service 從 HSQLDB 查詢，回傳獸醫 JSON
+5. 回應沿原路返回瀏覽器
+
+啟動相依：config-server → discovery-server → 業務服務
+（業務服務啟動時向 config-server 取設定、向 Eureka 註冊）
+```
+
+#### 技術棧
+
+| 層次 | 技術 |
+|------|------|
+| 語言 / 框架 | Java 17 · Spring Boot 3.x · Spring Cloud 2023.x |
+| 服務發現 | Netflix Eureka |
+| 設定管理 | Spring Cloud Config |
+| API Gateway | Spring Cloud Gateway（Reactive） |
+| 監控埋點 | Micrometer + `/actuator/prometheus` |
+| 鏈路追蹤 | Micrometer Tracing（OTLP / Zipkin） |
+| 資料層 | Spring Data JPA + HSQLDB |
+| 建置 | Maven 多模組（parent POM + 各服務 module） |
+
+### 微服務架構（部署拓樸）
 
 ```
 外部用戶
