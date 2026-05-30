@@ -1721,6 +1721,72 @@ containers:
 
 > **分支**：`istio` | **Manifest**：`petclinic-istio/`
 
+### Spring PetClinic 應用架構（Istio 精簡版）
+
+**Spring PetClinic** 是 Spring 官方的經典範例 —— 一個**寵物診所管理系統**，管理飼主、寵物、獸醫與就診記錄。
+
+本分支與 `spring-cloud` 分支使用**相同的業務領域**，但**移除了所有 Spring Cloud 基礎設施服務**，改由 Kubernetes 原生機制 + Istio 提供同等能力。
+
+#### 業務領域模型（與 spring-cloud 分支相同）
+
+```
+Owner（飼主）──── 1:N ────> Pet（寵物）──── N:1 ────> PetType（寵物種類）
+   id, firstName,            id, name,                 cat / dog / bird...
+   lastName, address,        birthDate
+   city, telephone               │
+                                  │ 1:N
+                                  ▼
+                              Visit（就診記錄）
+                              id, date, description
+
+Vet（獸醫）──── N:M ────> Specialty（專長）
+```
+
+#### 微服務拆分（只保留 3 個業務服務）
+
+| 微服務 | Port | 業務職責 | 領域物件 | Istio Sidecar |
+|--------|------|---------|---------|--------------|
+| **customers-service** | 8081 | 飼主與寵物管理 | Owner, Pet, PetType | Envoy proxy |
+| **vets-service** | 8083 | 獸醫與專長管理 | Vet, Specialty | Envoy proxy |
+| **visits-service** | 8082 | 就診記錄管理 | Visit | Envoy proxy |
+
+> **與 spring-cloud 分支的關鍵差異**：移除了 config-server、discovery-server、
+> api-gateway、admin-server 四個 Spring Cloud 基礎設施服務。業務邏輯完全不變，
+> 但服務治理（設定、發現、路由、可觀測性、安全）全部下放到 mesh 層。
+
+#### Spring Cloud 元件 → Kubernetes/Istio 對應
+
+| 原 Spring Cloud 服務 | 取代方案 | 機制 |
+|---------------------|---------|------|
+| config-server | Kubernetes **ConfigMap** | 掛載設定檔，語言無關 |
+| discovery-server (Eureka) | **Kubernetes DNS** | `vets-service.petclinic.svc.cluster.local` |
+| api-gateway (Spring Gateway) | **Istio IngressGateway + VirtualService** | 宣告式路由，零程式碼 |
+| admin-server | **Prometheus + Grafana + Kiali** | mesh 層觀測，無需埋點 |
+| Resilience4j（程式碼熔斷） | **Istio DestinationRule** | 外部熔斷策略 |
+
+#### 請求流程（Istio 版，以查詢獸醫為例）
+
+```
+1. 瀏覽器 → GET petclinic.apps-crc.testing/api/vet/vets
+2. OpenShift Route → istio-ingressgateway
+3. Istio VirtualService 比對路徑 /api/vet/vets，rewrite 為 /vets
+4. 透過 K8s DNS 直接路由到 vets-service:8083（無需 Eureka 查詢）
+5. vets-service 的 Envoy sidecar 接收，轉給應用容器
+6. 回應沿原路返回（sidecar 自動產生 trace span 給 Jaeger）
+
+服務間：Envoy sidecar 自動 mTLS（PeerAuthentication STRICT）
+```
+
+#### 技術棧
+
+| 層次 | spring-cloud 分支 | istio 分支 |
+|------|------------------|-----------|
+| 服務發現 | Netflix Eureka | Kubernetes DNS |
+| 設定管理 | Spring Cloud Config | ConfigMap |
+| API 路由 | Spring Cloud Gateway | Istio VirtualService |
+| 鏈路追蹤 | 應用埋點（Micrometer） | Envoy sidecar 自動產生 |
+| 業務邏輯 | Java 17 · Spring Boot 3.x（**完全相同**） | Java 17 · Spring Boot 3.x |
+
 ### 架構對比：Spring Cloud vs Istio
 
 ```
