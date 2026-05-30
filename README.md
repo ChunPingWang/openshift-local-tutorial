@@ -13,6 +13,32 @@
 | 第 10 章 | ConfigMap + Secret 注入環境變數 | ✅ 通過 |
 | 第 11 章 | PVC 持久化儲存，寫入驗證 | ✅ 通過 |
 | 第 12 章 | HPA 建立，min=2 max=5 | ✅ 通過 |
+| 第 13 章 | 日誌查看、port-forward、事件監控 | ✅ 通過 |
+| 第 14 章 | Pod 間網路通訊、DNS 發現、NetworkPolicy、TLS Route | ✅ 通過 |
+
+## 實際執行截圖
+
+### Web Console 登入頁
+
+![OpenShift Web Console 登入頁](screenshots/01-webconsole-login.png)
+
+### 第 8 章：Nginx 部署成功
+
+![Nginx Welcome Page](screenshots/app-nginx.png)
+
+> 透過 Route `nginx-demo-app.apps-crc.testing` 存取，HTTP 200
+
+### 第 8 章：Hello OpenShift! 回應
+
+![Hello OpenShift](screenshots/app-hello-world.png)
+
+> `hello-world-demo-app.apps-crc.testing` 回應 "Hello OpenShift!"
+
+### 第 9 章：S2I 建置的 Node.js 應用
+
+![Node.js Crud Application](screenshots/app-nodejs-sample.png)
+
+> 從 GitHub openshift/nodejs-ex 原始碼，S2I 自動建置並部署，耗時約 2 分鐘
 
 ---
 
@@ -1109,100 +1135,185 @@ spec:
 # 以 kubeadmin 登入後，Web Console 提供內建監控
 # 左側選單 → Observe → Dashboards
 
-# 命令列查看資源使用率（需要 metrics-server）
-oc adm top pods
+# 啟用 Cluster Monitoring（需重啟 CRC，約需額外 2GB RAM）
+crc config set enable-cluster-monitoring true
+crc stop && crc start --pull-secret-file pull-secret.txt
+
+# 啟用後可用命令列查看資源使用率
+oc adm top pods -n demo-app
 oc adm top nodes
 ```
 
-### 查看日誌
+> **OpenShift Local 說明**：預設未啟用 monitoring stack（省資源）。  
+> 執行 `crc config set enable-cluster-monitoring true` 並重啟後才能使用 Prometheus/Grafana。
+
+### 查看日誌（實測驗證）
 
 ```bash
 # 查看 Pod 日誌
 oc logs <pod-name>
 oc logs -f <pod-name>                    # 即時追蹤
 oc logs <pod-name> -c <container-name>   # 多容器 Pod 指定容器
-oc logs --previous <pod-name>            # 查看上一個已終止的容器日誌
+oc logs --previous <pod-name>            # 查看崩潰前的日誌
 
-# 查看事件（排查問題的重要來源）
-oc get events --sort-by='.lastTimestamp'
-oc get events -n my-project
+# 查看事件（排查問題最重要的資訊來源）
+oc get events -n demo-app --sort-by='.lastTimestamp'
+```
+
+**實測 nginx Pod 日誌輸出：**
+```
+/docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+/docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+```
+
+**實測 S2I Build 日誌（最後幾行）：**
+```
+Successfully pushed image-registry.openshift-image-registry.svc:5000/demo-app/nodejs-sample
+Push successful
+```
+
+### Port-Forward 本機直接存取（實測）
+
+```bash
+# 將叢集內的 Pod Port 映射到本機
+oc port-forward deployment/nginx 18080:8080 -n demo-app
+
+# 另開終端機測試
+curl http://localhost:18080
+# → HTTP 200，無需 Route 即可本機存取
+```
+
+### 查看叢集事件（排查部署問題）
+
+```bash
+oc get events -n demo-app --sort-by='.lastTimestamp' | tail -10
+```
+
+**實測輸出範例：**
+```
+Normal   ScalingReplicaSet   deployment/hello-world   Scaled up replica set hello-world-9d5bd7cc4 from 1 to 2
+Normal   Pulled              pod/hello-world-...       Successfully pulled image "docker.io/openshift/hello-openshift:latest"
+Normal   Started             pod/hello-world-...       Started container hello
+Warning  FailedGetResourceMetric  hpa/hello-world      failed to get cpu utilization: Metrics API not available
 ```
 
 ### 常見問題排查
 
 ```bash
-# Pod 無法啟動
-oc describe pod <pod-name>     # 查看 Events 欄位
-oc logs <pod-name>             # 查看應用程式錯誤
+# Pod 無法啟動 → 看 Events
+oc describe pod <pod-name>
 
-# 容器一直 CrashLoopBackOff
-oc logs --previous <pod-name>  # 查看崩潰前的日誌
+# CrashLoopBackOff → 看崩潰前日誌
+oc logs --previous <pod-name>
 
-# Pod 卡在 Pending
-oc describe pod <pod-name>     # 通常是資源不足或 PVC 未綁定
+# Pod 卡在 Pending → 通常是資源不足或 PVC 未綁定
+oc describe pod <pod-name>
 
-# 無法連線到服務
-oc get endpoints <service>     # 確認 Service 有指向到 Pod
-oc get svc                     # 確認 Service Port 設定
+# 進入容器排查（精簡映像用 sh）
+oc exec -it <pod-name> -- sh
 
-# 進入 Pod 內部排查
-oc exec -it <pod-name> -- bash
-oc exec -it <pod-name> -- curl http://other-service
+# 直接在容器內測試 Service 連通性
+NGINX_POD=$(oc get pod -l app=nginx -o jsonpath='{.items[0].metadata.name}')
+oc exec $NGINX_POD -- curl -s http://hello-world:8080
 ```
 
 ---
 
 ## 14. 網路模型與路由
 
-### Pod 網路
+### Pod 網路（實測 IP 分配）
 
 ```
-每個 Pod 有唯一 IP（由 SDN/OVN-Kubernetes 分配）
+每個 Pod 有唯一 IP（由 OVN-Kubernetes 分配，網段 10.217.0.0/23）
 
-Pod 間通訊（同 Project）：
-  Pod A (10.128.0.5) → Pod B (10.128.0.6)  直接通訊
+實測 demo-app 中的 Pod IP：
+  nginx-7d7668c9d-64h6m     → 10.217.0.79
+  nginx-7d7668c9d-j55zp     → 10.217.0.78
+  hello-world-9d5bd7cc4-... → 10.217.0.139
+  nodejs-sample-...         → 10.217.0.135
 
-Pod 間通訊（跨 Project）：
-  預設不允許（NetworkPolicy 控制）
-  需要明確建立 NetworkPolicy 或同一 Namespace
+Pod 間通訊（同 Project）：直接連通，無需 Service
+Pod 間通訊（跨 Project）：預設隔離，需 NetworkPolicy 明確允許
 ```
 
-### NetworkPolicy — 網路隔離
+### Pod 間通訊驗證（實測）
+
+```bash
+# 從 nginx Pod 直接存取 hello-world Service
+NGINX_POD=$(oc get pod -l app=nginx -o jsonpath='{.items[0].metadata.name}')
+HW_SVC_IP=$(oc get svc hello-world -o jsonpath='{.spec.clusterIP}')
+
+# 透過 ClusterIP 存取
+oc exec $NGINX_POD -- curl -s -o /dev/null -w "%{http_code}" http://$HW_SVC_IP:8080
+# → 200
+
+# 透過 DNS 名稱存取（服務發現）
+oc exec $NGINX_POD -- curl -s -o /dev/null -w "%{http_code}" \
+  http://hello-world.demo-app.svc.cluster.local:8080
+# → 200
+```
+
+**DNS 服務發現格式：**
+```
+<service-name>.<namespace>.svc.cluster.local:<port>
+hello-world.demo-app.svc.cluster.local:8080
+```
+
+### NetworkPolicy — 網路隔離（實測）
 
 ```yaml
-# 只允許 frontend 標籤的 Pod 訪問 backend
+# 只允許 nginx 標籤的 Pod 訪問 hello-world
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-frontend-to-backend
+  name: allow-nginx-to-hello
+  namespace: demo-app
 spec:
   podSelector:
     matchLabels:
-      app: backend
+      app: hello-world
   ingress:
   - from:
     - podSelector:
         matchLabels:
-          app: frontend
+          app: nginx
     ports:
     - protocol: TCP
       port: 8080
 ```
 
-### Route 類型
+```bash
+oc apply -f network-policy.yaml
+oc get networkpolicy -n demo-app
+# NAME                   POD-SELECTOR      AGE
+# allow-nginx-to-hello   app=hello-world   10s
+```
+
+### Route 類型（實測 4 條 Route 全部 HTTP 200）
 
 ```bash
 # 1. 不加密（HTTP）
-oc expose service my-app
+oc expose service nginx
+# → nginx-demo-app.apps-crc.testing           HTTP 200
 
-# 2. Edge TLS（在 Router 終止 TLS，後段是 HTTP）
-oc expose service my-app --tls-termination=edge
+# 2. Edge TLS（Router 終止 TLS，後段 HTTP）
+oc create route edge nginx-tls --service=nginx --port=8080
+# → nginx-tls-demo-app.apps-crc.testing       HTTPS 200
 
-# 3. Passthrough（TLS 直通到 Pod，Router 不解密）
+# 3. Passthrough（TLS 直通到 Pod）
 oc expose service my-app --tls-termination=passthrough
 
-# 4. Re-encrypt（Router 解密再重新加密到 Pod）
+# 4. Re-encrypt（Router 解密再加密到 Pod）
 oc expose service my-app --tls-termination=reencrypt
+```
+
+**實測所有 Route 連線結果：**
+```
+http://nginx-demo-app.apps-crc.testing          → HTTP 200
+http://hello-world-demo-app.apps-crc.testing    → HTTP 200
+http://nodejs-sample-demo-app.apps-crc.testing  → HTTP 200
+https://nginx-tls-demo-app.apps-crc.testing     → HTTP 200 (TLS Edge)
 ```
 
 ---
