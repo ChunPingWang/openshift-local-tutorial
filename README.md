@@ -1770,21 +1770,39 @@ management:
 
 ### 截圖
 
-#### Prometheus — 指標查詢介面
+#### Prometheus — Targets（抓取目標，UP 狀態）
 
-![Prometheus](screenshots/obs-prometheus.png)
+![Prometheus Targets](screenshots/ch17-prometheus-targets.png)
 
-#### AlertManager — 告警管理
+> Targets 頁面：prometheus 自身端點 State=**UP**，Last Scrape 11s 前
 
-![AlertManager](screenshots/obs-alertmanager.png)
+#### Prometheus — Alerts（告警規則）
 
-#### Grafana — 統一視覺化（含 Prometheus + Loki datasource）
+![Prometheus Alerts](screenshots/ch17-prometheus-alerts.png)
 
-![Grafana](screenshots/obs-grafana.png)
+#### Prometheus — Graph（`up` 指標查詢）
 
-#### Zipkin — 分散式鏈路追蹤
+![Prometheus Query](screenshots/ch17-prometheus-query.png)
 
-![Zipkin](screenshots/obs-zipkin.png)
+#### AlertManager — Status
+
+![AlertManager Status](screenshots/ch17-alertmanager-status.png)
+
+#### AlertManager — Alerts
+
+![AlertManager Alerts](screenshots/ch17-alertmanager-alerts.png)
+
+#### Grafana — 首頁（已登入，admin/petclinic）
+
+![Grafana Home](screenshots/ch17-grafana-home.png)
+
+#### Grafana — Datasources（Prometheus + Loki 已設定）
+
+![Grafana Datasources](screenshots/ch17-grafana-datasources.png)
+
+#### Zipkin — 分散式鏈路追蹤 UI
+
+![Zipkin](screenshots/ch17-zipkin.png)
 
 ---
 
@@ -1846,9 +1864,27 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://petclinic.apps-crc.testing/api/vet/vets
 ```
 
-**Keycloak 登入頁：**
+#### Keycloak — 登入頁
 
-![Keycloak](screenshots/obs-keycloak.png)
+![Keycloak Login](screenshots/obs-keycloak.png)
+
+#### Keycloak — Spring PetClinic Realm（Admin Console）
+
+![Keycloak Realm](screenshots/ch18-keycloak-realm.png)
+
+> Admin 登入後切換到 **Spring PetClinic** realm，左側顯示 Clients、Users、Realm roles 等管理選單
+
+#### Keycloak — Clients（API Gateway + Grafana）
+
+![Keycloak Clients](screenshots/ch18-keycloak-clients.png)
+
+#### Keycloak — Users（alice / bob / admin）
+
+![Keycloak Users](screenshots/ch18-keycloak-users.png)
+
+#### Keycloak — Realm Roles（user / vet / admin）
+
+![Keycloak Roles](screenshots/ch18-keycloak-roles.png)
 
 ### cert-manager — mTLS 東西向加密
 
