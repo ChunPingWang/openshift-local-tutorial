@@ -1,6 +1,18 @@
 # OpenShift Local 完整學習教程
 
 > 本教程適合初學者，從零開始理解 Kubernetes 與 OpenShift 的架構與概念，並透過 OpenShift Local (CRC) 在本機實作。
+> 
+> **驗證環境**：OpenShift Local v2.61.0 · OpenShift v4.20.5 · Linux (GNOME/Wayland) · 2026-05-30
+
+## 驗證狀態
+
+| 章節 | 內容 | 狀態 |
+|------|------|------|
+| 第 8 章 | Nginx + Hello World 部署、Service、Route | ✅ 通過 |
+| 第 9 章 | S2I 從 GitHub 建置 Node.js 應用 | ✅ 通過 |
+| 第 10 章 | ConfigMap + Secret 注入環境變數 | ✅ 通過 |
+| 第 11 章 | PVC 持久化儲存，寫入驗證 | ✅ 通過 |
+| 第 12 章 | HPA 建立，min=2 max=5 | ✅ 通過 |
 
 ---
 
@@ -814,17 +826,36 @@ Application Image → 推送到 ImageStream → 自動部署
 oc new-app nodejs~https://github.com/openshift/nodejs-ex.git \
   --name=nodejs-sample
 
-# 查看建置進度
-oc logs -f bc/nodejs-sample
+# 查看建置進度（約 2 分鐘）
+oc logs -f buildconfig/nodejs-sample
 
 # 等待部署完成
 oc rollout status deployment/nodejs-sample
 
 # 對外公開
-oc expose service nodejs-sample
+oc expose service/nodejs-sample
 
 # 查看網址
 oc get route nodejs-sample
+```
+
+**驗證輸出（OpenShift Local 4.20.5 實測）：**
+```
+# S2I 建置流程自動完成：
+# 1. 從 GitHub clone 原始碼
+# 2. 使用 openshift/nodejs:22-ubi9 builder image
+# 3. 執行 npm install 安裝依賴
+# 4. 建置應用程式映像並推送到內建 Registry
+# 5. 自動觸發 Deployment 更新
+
+NAME                                       TYPE     STATUS     DURATION
+build.build.openshift.io/nodejs-sample-1   Source   Complete   1m57s
+
+NAME                                           TAGS     IMAGE REPOSITORY
+imagestream.image.openshift.io/nodejs-sample   latest   .../demo-app/nodejs-sample
+
+NAME            HOST/PORT                                   PORT
+nodejs-sample   nodejs-sample-demo-app.apps-crc.testing     8080-tcp   → HTTP 200
 ```
 
 ### 設定 Webhook 自動觸發建置
@@ -847,7 +878,8 @@ oc describe bc/nodejs-sample | grep -A 2 "GitHub"
 # 建立 ConfigMap（從字面值）
 oc create configmap app-config \
   --from-literal=DATABASE_HOST=postgres \
-  --from-literal=APP_ENV=production
+  --from-literal=APP_ENV=production \
+  --from-literal=LOG_LEVEL=info
 
 # 建立 ConfigMap（從檔案）
 oc create configmap nginx-config --from-file=nginx.conf
@@ -856,6 +888,14 @@ oc create configmap nginx-config --from-file=nginx.conf
 oc get configmap app-config -o yaml
 
 # 在 Deployment 中使用 ConfigMap（環境變數方式）
+```
+
+**驗證輸出（實測）：**
+```
+data:
+  APP_ENV: production
+  DATABASE_HOST: postgres
+  LOG_LEVEL: info
 ```
 
 ```yaml
@@ -955,6 +995,20 @@ oc get pv
 oc get storageclass
 ```
 
+**OpenShift Local 內建 StorageClass（實測）：**
+```
+NAME                                     PROVISIONER                        RECLAIMPOLICY   VOLUMEBINDINGMODE
+crc-csi-hostpath-provisioner (default)   kubevirt.io.hostpath-provisioner   Retain          WaitForFirstConsumer
+```
+
+> **注意**：`WaitForFirstConsumer` 表示 PVC 在第一個 Pod 排程後才會真正 Bound，這是正常行為。
+
+**PVC 生命週期（實測）：**
+```
+建立 PVC 後：  STATUS=Pending（等待 Pod 觸發）
+Pod 部署後：   STATUS=Bound, CAPACITY=49Gi, VOLUME=pvc-bd10f45a-...
+```
+
 ### 在 Pod 中使用 PVC
 
 ```yaml
@@ -999,16 +1053,30 @@ HPA 偵測到平均 CPU > 70%
 ```
 
 ```bash
-# 建立 HPA（CPU 使用率超過 70% 就擴縮）
-oc autoscale deployment my-app \
+# 1. 先為 Deployment 設定資源 requests（HPA 必要條件）
+oc set resources deployment/hello-world \
+  --requests=cpu=50m,memory=64Mi \
+  --limits=cpu=200m,memory=128Mi
+
+# 2. 建立 HPA（CPU 使用率超過 70% 就擴縮）
+oc autoscale deployment/hello-world \
   --min=2 \
-  --max=10 \
+  --max=5 \
   --cpu-percent=70
 
 # 查看 HPA 狀態
 oc get hpa
-oc describe hpa my-app
+oc describe hpa hello-world
 ```
+
+**驗證輸出（實測）：**
+```
+NAME          REFERENCE                TARGETS              MINPODS   MAXPODS   REPLICAS
+hello-world   Deployment/hello-world   cpu: <unknown>/70%   2         5         2
+```
+
+> **OpenShift Local 說明**：`cpu: <unknown>` 表示 metrics-server 未啟用，為 CRC 單節點環境的正常現象。  
+> 在正式叢集中，Targets 會顯示實際 CPU 使用率（例如 `cpu: 15%/70%`），並根據負載自動調整副本數。
 
 ```yaml
 apiVersion: autoscaling/v2
