@@ -37,11 +37,45 @@
 
 > `hello-world-demo-app.apps-crc.testing` 回應 "Hello OpenShift!"
 
+### 第 9 章：S2I BuildConfig — Complete（44 秒建置完成）
+
+![BuildConfig 列表](screenshots/ch09-builds.png)
+
+> BuildConfig `nodejs-sample` 最後一次建置 ✅ Complete，耗時 44 秒
+
+![S2I 建置 Deployment 就緒](screenshots/ch09-nodejs-running.png)
+
+> nodejs-sample Deployment 從 S2I 建置的映像自動部署，Pod 就緒
+
 ### 第 9 章：S2I 建置的 Node.js 應用
 
 ![Node.js Crud Application](screenshots/app-nodejs-sample.png)
 
-> 從 GitHub openshift/nodejs-ex 原始碼，S2I 自動建置並部署，耗時約 2 分鐘
+> 從 GitHub openshift/nodejs-ex 原始碼，S2I 自動建置並部署，耗時約 44 秒
+
+### 第 10 章：ConfigMap 設定管理
+
+![ConfigMap app-config](screenshots/ch10-configmap.png)
+
+> ConfigMap `app-config` 包含 DATABASE_HOST、APP_ENV、LOG_LEVEL 三個設定值
+
+### 第 10 章：Secret 敏感資料管理
+
+![Secret db-secret](screenshots/ch10-secret.png)
+
+> Secret `db-secret`（Opaque 類型）儲存 username/password，值自動 base64 編碼
+
+### 第 11 章：PVC 持久化儲存 — Bound
+
+![PVC 列表](screenshots/ch11-pvc.png)
+
+> PVC `my-data` 狀態 ✅ Bound，綁定到 PV（49 GiB），由 `crc-csi-hostpath-provisioner` 動態佈建
+
+### 第 12 章：HPA 水平自動擴縮
+
+![HPA 列表](screenshots/ch12-hpa.png)
+
+> HPA `hello-world` 設定：最小 2 副本、最大 5 副本、CPU 觸發閾值 70%
 
 ---
 
