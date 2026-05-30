@@ -4,6 +4,51 @@
 > 
 > **驗證環境**：OpenShift Local v2.61.0 · OpenShift v4.20.5 · Linux (GNOME/Wayland) · 2026-05-30
 
+## ⚠️ 計算資源建議（務必先讀）
+
+> **本 PoC 含多個重量級技術棧，CRC 預設資源不足以同時運行全部。**
+> 請依你要做的範圍，**先用 `crc config set` 調整資源再 `crc start`**，避免中途 Pod Pending / DiskPressure 卡關。
+
+### 各階段資源需求（實測 requests 加總）
+
+| 部署範圍 | 建議 CPU | 建議 RAM | 磁碟 | 說明 |
+|---------|---------|---------|------|------|
+| **OpenShift 系統基線** | （固定） | ~9.5 GB | — | 控制平面本身就吃掉約 2.3 核 / 9.5GB |
+| 基礎章節（第 1-15 章 demo-app） | 4 核 | 11 GB | 40 GB | CRC 預設即可 |
+| + PetClinic 微服務（7 服務） | 6 核 | 16 GB | 60 GB | Spring Cloud 全棧 |
+| + 可觀測性（Prometheus/Grafana/Loki/OTel/Zipkin） | 6 核 | 18 GB | 70 GB | 加 ~2GB |
+| + 安全（Keycloak + cert-manager） | 7 核 | 20 GB | 70 GB | Keycloak ~0.5GB |
+| **+ CI/CD（Tekton + ArgoCD）= 完整全棧** | **8 核** | **24 GB** | **80 GB** | Tekton 18 pods + ArgoCD 9 pods |
+
+> 實測：ArgoCD 約佔 2.1 核 / 2.5GB，Tekton 平台約 18 個常駐 pod。  
+> **同時運行全部**需 8 核 / 24GB；資源不足時 ArgoCD application-controller 會卡在 Pending。
+
+### 設定方式
+
+```bash
+# 完整全棧建議（CI/CD + 可觀測性 + 安全 + PetClinic）
+crc config set cpus 8
+crc config set memory 24576      # 24 GB（單位 MiB）
+crc config set disk-size 80
+crc setup
+crc start --pull-secret-file pull-secret.txt
+
+# 資源有限時的策略：分階段部署，用完一個技術棧先縮減再上下一個
+oc scale deployment --all -n <namespace> --replicas=0   # 暫時釋放
+```
+
+### 省資源技巧
+
+| 技巧 | 指令 | 釋放量 |
+|------|------|--------|
+| 移除 Kasten K10 備份（CRC 預裝） | `oc delete project kasten-io minio-system` | ~3.2 GB |
+| EFK 改用 Loki（輕量日誌） | 用 `04-loki-stack.yaml` 取代 `05-efk-stack.yaml` | ~2 GB |
+| 微服務用 BestEffort QoS | 不設 `resources.requests` | 排程不受限 |
+| 用完的技術棧縮到 0 | `oc scale deploy --all --replicas=0 -n <ns>` | 視服務 |
+| 清理已完成 build pod | `oc delete pods --field-selector=status.phase=Succeeded` | 磁碟 |
+
+> **完整安裝與驗證指令請見 [INSTALL-AND-VERIFY.md](INSTALL-AND-VERIFY.md)**
+
 ## 驗證狀態
 
 | 章節 | 內容 | 狀態 |

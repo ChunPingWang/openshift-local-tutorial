@@ -1,0 +1,80 @@
+# ============================================================
+# OpenShift GitOps (ArgoCD) — 宣告式持續部署
+# ArgoCD 監控 Git repo，自動將 manifest 同步到叢集
+# 取代手動的 oc apply
+# ============================================================
+
+# ── ArgoCD Application：監控 petclinic manifest ──────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: petclinic-app
+  namespace: openshift-gitops
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ChunPingWang/openshift-local-tutorial.git
+    targetRevision: spring-cloud
+    path: petclinic           # 監控 petclinic/ 目錄的 manifest
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: petclinic
+  syncPolicy:
+    automated:
+      prune: true             # 自動刪除 Git 中已移除的資源
+      selfHeal: true          # 偵測手動變更並還原為 Git 狀態
+    syncOptions:
+    - CreateNamespace=true
+    - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# ── ArgoCD Application：監控可觀測性技術棧 ───────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: petclinic-observability
+  namespace: openshift-gitops
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ChunPingWang/openshift-local-tutorial.git
+    targetRevision: spring-cloud
+    path: spring-cloud-stack/observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: false            # 可觀測性資源不自動 prune（保守）
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+---
+# ── App of Apps 模式（管理多個 Application）──────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: petclinic-root
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ChunPingWang/openshift-local-tutorial.git
+    targetRevision: spring-cloud
+    path: spring-cloud-stack/cicd/apps   # 指向其他 Application 定義
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: openshift-gitops
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,0 +1,78 @@
+# ============================================================
+# Tekton Triggers — Git Webhook 自動觸發 Pipeline
+# git push → GitHub Webhook → EventListener → 啟動 PipelineRun
+# ============================================================
+
+# ── TriggerTemplate：定義要建立的 PipelineRun ────────────
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: petclinic-trigger-template
+  namespace: petclinic
+spec:
+  params:
+  - name: git-revision
+    default: main
+  - name: git-url
+    default: https://github.com/spring-petclinic/spring-petclinic-microservices.git
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: petclinic-webhook-run-
+    spec:
+      pipelineRef:
+        name: petclinic-cicd
+      params:
+      - name: git-url
+        value: $(tt.params.git-url)
+      - name: git-revision
+        value: $(tt.params.git-revision)
+      workspaces:
+      - name: shared-workspace
+        persistentVolumeClaim:
+          claimName: petclinic-source-pvc
+      taskRunTemplate:
+        serviceAccountName: pipeline
+---
+# ── TriggerBinding：從 webhook payload 取參數 ────────────
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: petclinic-trigger-binding
+  namespace: petclinic
+spec:
+  params:
+  - name: git-revision
+    value: $(body.head_commit.id)
+  - name: git-url
+    value: $(body.repository.clone_url)
+---
+# ── EventListener：接收 webhook 的端點 ───────────────────
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: petclinic-event-listener
+  namespace: petclinic
+spec:
+  serviceAccountName: pipeline
+  triggers:
+  - name: github-push
+    bindings:
+    - ref: petclinic-trigger-binding
+    template:
+      ref: petclinic-trigger-template
+---
+# ── Route：讓 GitHub 可以連到 EventListener ──────────────
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: petclinic-webhook
+  namespace: petclinic
+spec:
+  host: petclinic-webhook.apps-crc.testing
+  to:
+    kind: Service
+    name: el-petclinic-event-listener
+  port:
+    targetPort: http-listener

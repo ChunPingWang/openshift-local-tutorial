@@ -1,0 +1,165 @@
+# ============================================================
+# OpenShift Pipelines (Tekton) — CI/CD Pipeline
+# 流程：git-clone → maven-build → s2i-build → deploy
+# 取代手動的 oc start-build + oc set image
+# ============================================================
+
+# ── Workspace PVC（pipeline 各 task 間共享原始碼）─────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: petclinic-source-pvc
+  namespace: petclinic
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+# ── 自訂 Task：git-clone（新版 Pipelines 不預載）─────────
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone
+  namespace: petclinic
+spec:
+  params:
+  - name: url
+    type: string
+  - name: revision
+    type: string
+    default: main
+  workspaces:
+  - name: output
+  steps:
+  - name: clone
+    image: alpine/git:latest
+    script: |
+      #!/bin/sh
+      set -e
+      echo "=== Clone $(params.url) @ $(params.revision) ==="
+      cd $(workspaces.output.path)
+      rm -rf ./* .git 2>/dev/null || true
+      git clone --depth 1 --branch $(params.revision) $(params.url) .
+      echo "=== Clone 完成 ==="
+      ls -la
+---
+# ── 自訂 Task：S2I 二進位建置（從已 clone 的原始碼）──────
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: s2i-binary-build
+  namespace: petclinic
+spec:
+  params:
+  - name: SERVICE
+    type: string
+    description: 微服務名稱（如 customers-service）
+  - name: MODULE
+    type: string
+    description: Maven 子模組（如 spring-petclinic-customers-service）
+  workspaces:
+  - name: source
+  steps:
+  - name: start-build
+    image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+    script: |
+      #!/bin/sh
+      set -e
+      echo "=== 觸發 $(params.SERVICE) 的 S2I 建置 ==="
+      # 從 workspace 的原始碼做二進位 S2I 建置
+      oc start-build $(params.SERVICE) \
+        --from-dir=$(workspaces.source.path) \
+        --follow --wait
+      echo "=== 建置完成，更新 Deployment ==="
+      oc set image deployment/$(params.SERVICE) \
+        $(params.SERVICE)=image-registry.openshift-image-registry.svc:5000/petclinic/$(params.SERVICE):latest \
+        || echo "Deployment 尚未建立，由 ImageChange trigger 處理"
+---
+# ── Pipeline：完整 CI/CD 流程 ────────────────────────────
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: petclinic-cicd
+  namespace: petclinic
+spec:
+  description: |
+    PetClinic 微服務 CI/CD：clone → 各服務 S2I 建置 → 部署
+  params:
+  - name: git-url
+    type: string
+    default: https://github.com/spring-petclinic/spring-petclinic-microservices.git
+  - name: git-revision
+    type: string
+    default: main
+  workspaces:
+  - name: shared-workspace
+  tasks:
+  # 1. Clone 原始碼
+  - name: fetch-source
+    taskRef:
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: shared-workspace
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+
+  # 2. 並行建置各業務服務（S2I）
+  - name: build-customers
+    runAfter: [fetch-source]
+    taskRef:
+      name: s2i-binary-build
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: SERVICE
+      value: customers-service
+    - name: MODULE
+      value: spring-petclinic-customers-service
+
+  - name: build-vets
+    runAfter: [fetch-source]
+    taskRef:
+      name: s2i-binary-build
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: SERVICE
+      value: vets-service
+    - name: MODULE
+      value: spring-petclinic-vets-service
+
+  - name: build-visits
+    runAfter: [fetch-source]
+    taskRef:
+      name: s2i-binary-build
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    params:
+    - name: SERVICE
+      value: visits-service
+    - name: MODULE
+      value: spring-petclinic-visits-service
+---
+# ── PipelineRun：觸發一次執行 ────────────────────────────
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: petclinic-cicd-run-
+  namespace: petclinic
+spec:
+  pipelineRef:
+    name: petclinic-cicd
+  workspaces:
+  - name: shared-workspace
+    persistentVolumeClaim:
+      claimName: petclinic-source-pvc
+  taskRunTemplate:
+    serviceAccountName: pipeline
