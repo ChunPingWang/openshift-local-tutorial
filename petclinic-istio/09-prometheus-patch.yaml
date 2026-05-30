@@ -1,0 +1,88 @@
+# ============================================================
+# 將 Istio 內建 Prometheus 接上 AlertManager 與告警規則
+# Istio addons 的 Prometheus 設定較精簡，此處 patch 補上：
+#   - rule_files（載入 istio-alerts.yaml）
+#   - alerting（指向 AlertManager）
+# ============================================================
+#
+# 套用方式（覆寫 Istio addons 的 prometheus ConfigMap）：
+#   oc apply -f 09-prometheus-patch.yaml
+#   oc rollout restart deployment/prometheus -n istio-system
+#
+# 註：Istio addons 的 Prometheus ConfigMap 名稱為 "prometheus"
+#     此檔以 patch 方式加入 alerting 區段
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-istio-extra
+  namespace: istio-system
+data:
+  # 額外的 Prometheus 設定片段（需合併到主 prometheus.yml）
+  alerting-config.yml: |
+    # 加到 Istio addons prometheus.yml 的內容：
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.istio-system:9093']
+    rule_files:
+      - /etc/prometheus/rules/istio-alerts.yaml
+
+  # 完整的 Prometheus 設定（含 Istio 抓取 + 告警）
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.istio-system:9093']
+
+    rule_files:
+      - /etc/prometheus/rules/*.yaml
+
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # 抓取 Istio sidecar（Envoy）的 mesh metrics
+      - job_name: 'envoy-stats'
+        metrics_path: /stats/prometheus
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: '.*-envoy-prom'
+
+      # 抓取 istiod 控制平面 metrics
+      - job_name: 'istiod'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: ['istio-system']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: istiod;http-monitoring
+
+      # 抓取應用 Pod 的 Spring Boot metrics（若有 annotation）
+      - job_name: 'spring-boot-petclinic'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['petclinic']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__

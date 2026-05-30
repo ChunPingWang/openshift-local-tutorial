@@ -16,7 +16,7 @@
 | 第 13 章 | 日誌查看、port-forward、事件監控 | ✅ 通過 |
 | 第 14 章 | Pod 間網路通訊、DNS 發現、NetworkPolicy、TLS Route | ✅ 通過 |
 | 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署（Spring Cloud）| ✅ 通過 |
-| 第 17 章 | Istio IngressGateway + Prometheus + Grafana + Jaeger + Kiali | ✅ 通過 |
+| 第 17 章 | Istio + 完整可觀測性（Prometheus/AlertManager/Loki/Promtail/Jaeger/Kiali/Grafana） | ✅ 通過 |
 | 第 18 章 | Keycloak + Istio RequestAuthentication/AuthorizationPolicy/PeerAuthentication mTLS | ✅ 通過 |
 
 ## 實際執行截圖
@@ -1700,11 +1700,19 @@ OpenShift Route → istio-ingressgateway:80
     ├── /api/customer/owners  → customers-service:8081
     └── /api/visit/**         → visits-service:8082
 
-可觀測性工具（獨立 Routes）：
-    grafana.apps-crc.testing     → Grafana（儀表板）
-    jaeger.apps-crc.testing      → Jaeger（分散式追蹤）
-    kiali.apps-crc.testing       → Kiali（Service Mesh 拓墣）
-    prometheus.apps-crc.testing  → Prometheus（Metrics）
+可觀測性技術棧（完整三大支柱）：
+    ┌─ Metrics ──────────────────────────────────────┐
+    │  prometheus.apps-crc.testing       → Prometheus  │
+    │  alertmanager-istio.apps-crc.testing → AlertManager│
+    ├─ Logs ─────────────────────────────────────────┤
+    │  loki-istio.apps-crc.testing       → Loki        │
+    │  （Promtail DaemonSet 收集 Envoy access log）     │
+    ├─ Traces ───────────────────────────────────────┤
+    │  jaeger.apps-crc.testing           → Jaeger      │
+    ├─ 視覺化 ────────────────────────────────────────┤
+    │  grafana.apps-crc.testing          → Grafana     │
+    │  kiali.apps-crc.testing            → Kiali（拓墣）│
+    └─────────────────────────────────────────────────┘
 ```
 
 ### 移除的 Spring Cloud 元件
@@ -1724,7 +1732,9 @@ OpenShift Route → istio-ingressgateway:80
 | **Istio IngressGateway** | 取代 Spring Cloud Gateway |
 | **VirtualService** | 精確路徑路由 + Retry 策略 |
 | **DestinationRule** | 連線池限制 + 熔斷策略 |
-| **Prometheus** | 抓取 `/actuator/prometheus` metrics |
+| **Prometheus** | 抓取 Istio mesh metrics + Spring Boot metrics |
+| **AlertManager** | Istio 原生 metrics 告警（5xx 率、P99 延遲、mTLS 失敗） |
+| **Loki + Promtail** | 收集 Envoy access log 與應用日誌 |
 | **Kiali** | 視覺化 Service Mesh 拓墣 |
 | **Jaeger** | 分散式鏈路追蹤 |
 
@@ -1734,12 +1744,19 @@ OpenShift Route → istio-ingressgateway:80
 # 1. 安裝 Istio（minimal profile + IngressGateway）
 cat istio-minimal.yaml | istioctl install --skip-confirmation
 
-# 2. 安裝可觀測性 Addons
+# 2. 安裝可觀測性 Addons（Istio 內建）
 ADDONS="istio-1.22.3/samples/addons"
-oc apply -f $ADDONS/prometheus.yaml
-oc apply -f $ADDONS/grafana.yaml
-oc apply -f $ADDONS/jaeger.yaml
-oc apply -f $ADDONS/kiali.yaml
+oc apply -f $ADDONS/prometheus.yaml   # Metrics
+oc apply -f $ADDONS/grafana.yaml      # 視覺化
+oc apply -f $ADDONS/jaeger.yaml       # Traces
+oc apply -f $ADDONS/kiali.yaml        # Service Mesh 拓墣
+oc apply -f $ADDONS/loki.yaml         # Logs 儲存
+
+# 2b. 補強可觀測性（AlertManager + Promtail + Istio 告警規則）
+oc apply -f petclinic-istio/08-observability-complete.yaml
+# 接上 Prometheus 告警規則與 AlertManager
+oc apply -f petclinic-istio/09-prometheus-patch.yaml
+oc rollout restart deployment/prometheus -n istio-system
 
 # 3. 建立 petclinic Project（不啟用 namespace 層級 injection）
 oc new-project petclinic
@@ -1815,6 +1832,28 @@ spec:
 #### Jaeger — 分散式鏈路追蹤
 
 ![Jaeger UI](screenshots/istio-jaeger.png)
+
+### 可觀測性三大支柱完整性對照
+
+| 支柱 | 元件 | Istio 分支特色 |
+|------|------|---------------|
+| **Metrics** | Prometheus + AlertManager | 用 Istio 原生 metrics（`istio_requests_total`）告警，**無需應用埋點** |
+| **Logs** | Loki + Promtail | 收集 **Envoy access log**（含 method/path/response_code/duration） |
+| **Traces** | Jaeger | Istio sidecar 自動產生 span，**無需改程式碼** |
+| **視覺化** | Grafana + Kiali | Grafana 看指標，Kiali 看 Service Mesh 拓墣 |
+
+### Istio 原生告警規則（vs Spring Cloud Actuator 告警）
+
+```yaml
+# 用 Istio mesh metrics 告警，不需要服務暴露 /actuator/prometheus
+- alert: IstioHighErrorRate       # 5xx 率 > 5%（mesh 層觀測）
+- alert: IstioHighLatency         # P99 延遲 > 1s
+- alert: IstioServiceNoTraffic    # 服務 5 分鐘無流量
+- alert: IstioMutualTLSError      # 出現非 mTLS 連線（安全告警）
+```
+
+> **關鍵差異**：Spring Cloud 分支的告警依賴每個服務暴露 `/actuator/prometheus`；  
+> Istio 分支從 sidecar 的 mesh metrics 告警，**任何服務（即使沒埋點）都能被監控**。
 
 ### 驗證結果
 
