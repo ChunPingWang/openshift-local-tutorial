@@ -15,6 +15,7 @@
 | 第 12 章 | HPA 建立，min=2 max=5 | ✅ 通過 |
 | 第 13 章 | 日誌查看、port-forward、事件監控 | ✅ 通過 |
 | 第 14 章 | Pod 間網路通訊、DNS 發現、NetworkPolicy、TLS Route | ✅ 通過 |
+| 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署 | ✅ 通過 |
 
 ## 實際執行截圖
 
@@ -1399,6 +1400,192 @@ oc adm policy add-role-to-user <role> <user> -n <project>
 oc adm cordon <node>             # 標記節點不可排程
 oc adm drain <node>              # 排空節點（維護用）
 oc adm must-gather               # 收集診斷資訊
+```
+
+---
+
+## 16. 實戰：Spring PetClinic 微服務部署
+
+### 情境說明
+
+以 [Spring PetClinic Microservices](https://github.com/spring-petclinic/spring-petclinic-microservices) 為範例，示範在 OpenShift 上部署完整的微服務架構。所有服務透過 **S2I 從 GitHub 原始碼建置**，展示 OpenShift 的完整 CI/CD 能力。
+
+### 微服務架構
+
+```
+外部用戶
+    │
+    ▼
+Route: petclinic.apps-crc.testing
+    │
+    ▼
+API Gateway (port 8080)          ← Spring Cloud Gateway + Eureka 負載均衡
+    │
+    ├── /api/customer/** → Customers Service (8081)  ← 飼主 & 寵物資料
+    ├── /api/vet/**      → Vets Service      (8083)  ← 獸醫資料
+    └── /api/visit/**   → Visits Service    (8082)  ← 就診記錄
+
+Config Server (8888)             ← 集中設定管理（從 GitHub 讀取設定）
+Discovery Server / Eureka (8761) ← 服務發現 & 健康監控
+Admin Server (9090)              ← Spring Boot Admin 管理介面
+```
+
+### OpenShift 使用到的產品特性
+
+| 特性 | 用途 |
+|------|------|
+| **S2I（Source-to-Image）** | 從 GitHub 原始碼自動建置 Java 映像 |
+| **ImageStream** | 追蹤每次 S2I 建置產生的映像版本 |
+| **BuildConfig** | 定義建置策略、來源、輸出 |
+| **InitContainer** | 確保依賴服務就緒後才啟動（啟動順序控制） |
+| **Service DNS 發現** | Eureka 透過 K8s DNS 找到各服務 |
+| **Route** | 對外公開 API Gateway、Admin、Eureka UI |
+| **SCC anyuid** | 允許 Spring Boot 服務以適當 UID 執行 |
+
+### 部署步驟
+
+```bash
+# 1. 建立 Project 並授予 SCC
+oc new-project petclinic
+oc adm policy add-scc-to-user anyuid -z default -n petclinic
+
+# 2. 套用 ImageStream（追蹤建置結果）
+oc apply -f petclinic/02-imagestreams.yaml
+
+# 3. 套用 BuildConfig（S2I 建置定義）
+oc apply -f petclinic/01-buildconfigs.yaml
+
+# 4. 觸發建置（依序建置，先基礎設施再業務服務）
+oc start-build config-server --follow    # ~3 分鐘
+oc start-build discovery-server &
+oc start-build customers-service &
+oc start-build vets-service &
+oc start-build visits-service &
+oc start-build api-gateway &
+oc start-build admin-server &
+wait
+
+# 5. 設定 Deployment 使用內建 Registry 映像
+REGISTRY="image-registry.openshift-image-registry.svc:5000/petclinic"
+for svc in config-server discovery-server customers-service \
+           vets-service visits-service api-gateway admin-server; do
+  oc set image deployment/$svc ${svc}=${REGISTRY}/${svc}:latest -n petclinic
+done
+
+# 6. 建立 Service 與 Route
+oc apply -f petclinic/04-services-routes.yaml
+```
+
+### S2I 建置說明
+
+每個微服務的 BuildConfig 指定：
+- **來源**：`https://github.com/spring-petclinic/spring-petclinic-microservices.git`
+- **Builder Image**：`ubi8-openjdk-17:1.18`（OpenShift 內建 Java 17 S2I）
+- **建置指令**：`mvn package -pl spring-petclinic-<service> -am -DskipTests`
+- **輸出**：推送到內建 ImageRegistry → ImageStream
+
+```bash
+# 查看建置進度
+oc get builds -n petclinic
+oc logs -f build/config-server-1 -n petclinic
+
+# S2I 建置完成後映像自動推送到內建 Registry
+oc get imagestream -n petclinic
+```
+
+### 啟動順序控制（InitContainer）
+
+每個業務服務都有 InitContainer 等待 config-server 回應 HTTP 200：
+
+```yaml
+initContainers:
+- name: wait-config
+  image: busybox:1.36
+  command: ['sh','-c',
+    'until wget -q --spider http://config-server:8888/; do sleep 8; done']
+```
+
+這確保服務按正確順序啟動：`config-server → discovery-server → 業務服務`
+
+### 實測截圖
+
+#### PetClinic 前端 UI（API Gateway 路由）
+
+![PetClinic UI](screenshots/petclinic-ui.png)
+
+> `http://petclinic.apps-crc.testing` — Spring Cloud Gateway 將請求路由到各微服務
+
+#### Eureka 服務發現（5 個服務已註冊）
+
+![Eureka Dashboard](screenshots/petclinic-eureka.png)
+
+> `http://petclinic-discovery.apps-crc.testing` — 所有服務 UP，包含 Pod IP 與 Port
+
+#### Spring Boot Admin（全部正常）
+
+![Spring Boot Admin](screenshots/petclinic-admin.png)
+
+> `http://petclinic-admin.apps-crc.testing` — 5 個應用程式全部顯示 UP
+
+### 驗證結果
+
+```bash
+# 所有 Route 測試結果
+http://petclinic.apps-crc.testing              → HTTP 200  （前端 UI）
+http://petclinic.apps-crc.testing/api/vet/vets → HTTP 200  （Vets API）
+http://petclinic-admin.apps-crc.testing        → HTTP 200  （Spring Boot Admin）
+http://petclinic-discovery.apps-crc.testing    → HTTP 200  （Eureka UI）
+
+# Eureka 已註冊服務（API 查詢）
+curl -H "Accept: application/json" \
+  http://petclinic-discovery.apps-crc.testing/eureka/apps
+# → API-GATEWAY, CUSTOMERS-SERVICE, VETS-SERVICE, VISITS-SERVICE, ADMIN-SERVER
+#   全部 Status: UP
+```
+
+**獸醫資料 API 回應（/api/vet/vets）：**
+```json
+[
+  {"id":1,"firstName":"James","lastName":"Carter","specialties":[]},
+  {"id":2,"firstName":"Helen","lastName":"Leary","specialties":[{"name":"radiology"}]},
+  {"id":3,"firstName":"Linda","lastName":"Douglas","specialties":[{"name":"dentistry"},{"name":"surgery"}]}
+]
+```
+
+### 重要學習要點
+
+**1. Maven 多模組 S2I 建置**
+
+```yaml
+env:
+- name: MAVEN_ARGS
+  value: "package -pl spring-petclinic-customers-service -am -DskipTests"
+  # -pl：指定建置的子模組
+  # -am：同時建置所有依賴（包含父 POM）
+  # -DskipTests：跳過測試加速建置
+- name: ARTIFACT_DIR
+  value: "spring-petclinic-customers-service/target"
+```
+
+**2. Spring Cloud 服務發現在 K8s 上的運作**
+
+```
+傳統部署：服務間用硬編碼 IP/hostname
+OpenShift：SPRING_PROFILES_ACTIVE=docker 啟用 K8s DNS 服務發現
+  → customers-service.petclinic.svc.cluster.local
+  → Eureka 透過 K8s DNS 找到各服務並追蹤健康狀態
+```
+
+**3. BestEffort QoS 在資源受限環境**
+
+```yaml
+# CRC 單節點 RAM 有限（95%+ requests 已用完）
+# 不設 requests 讓排程器忽略 request 限制
+# 適用於學習環境，生產環境應設定適當 requests/limits
+containers:
+- name: customers-service
+  image: ...
+  # 不設 resources.requests → BestEffort QoS
 ```
 
 ---
