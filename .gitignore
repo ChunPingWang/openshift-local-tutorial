@@ -2,3 +2,5 @@ pull-secret.txt
 *.tar.xz
 crc-linux-*/
 .claude/
+istio-1.22.3/
+istio-*/
