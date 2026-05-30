@@ -1151,6 +1151,20 @@ spec:
 
 ## 13. 監控與日誌
 
+### Web Console — Pod 列表與日誌
+
+![Pod 列表](screenshots/ch13-pods.png)
+
+> Web Console 的 Pod 頁面：4 個 Pod（nginx ×2、hello-world ×2）全部 Running 1/1
+
+![Pod 日誌](screenshots/ch13-pod-logs.png)
+
+> nginx Pod 日誌：顯示啟動訊息與 HTTP 存取記錄（port-forward 測試的 GET / HTTP 200）
+
+![叢集事件](screenshots/ch13-events.png)
+
+> Events 頁面：顯示 Pod 啟動、映像拉取等完整事件歷程
+
 ### 內建監控（Prometheus + Grafana）
 
 ```bash
@@ -1206,6 +1220,12 @@ curl http://localhost:18080
 # → HTTP 200，無需 Route 即可本機存取
 ```
 
+**實測 port-forward 結果：**
+```
+Forwarding from 127.0.0.1:18080 -> 8080
+port-forward HTTP Status: 200   ← 直連叢集內 Pod，無需 Route
+```
+
 ### 查看叢集事件（排查部署問題）
 
 ```bash
@@ -1244,16 +1264,30 @@ oc exec $NGINX_POD -- curl -s http://hello-world:8080
 
 ## 14. 網路模型與路由
 
+### Web Console — 網路資源
+
+![Service 列表](screenshots/ch14-services.png)
+
+> Services 頁面：hello-world（10.217.5.222:8080）和 nginx（10.217.5.61:80）的 ClusterIP 與 Pod Selector
+
+![Route 列表](screenshots/ch14-routes.png)
+
+> Routes 頁面：hello-world 和 nginx 兩條路由，狀態 Accepted，點擊即可開啟外部連結
+
+![Topology 視圖](screenshots/ch14-topology.png)
+
+> Developer Topology：nginx 和 hello-world 兩個 Deployment 的視覺化節點，右上角圖示可直接開啟 Route
+
 ### Pod 網路（實測 IP 分配）
 
 ```
 每個 Pod 有唯一 IP（由 OVN-Kubernetes 分配，網段 10.217.0.0/23）
 
-實測 demo-app 中的 Pod IP：
-  nginx-7d7668c9d-64h6m     → 10.217.0.79
-  nginx-7d7668c9d-j55zp     → 10.217.0.78
-  hello-world-9d5bd7cc4-... → 10.217.0.139
-  nodejs-sample-...         → 10.217.0.135
+實測 demo-app 中的 Pod IP（本次執行）：
+  nginx-7d7668c9d-9wcsp     → 10.217.1.30
+  nginx-7d7668c9d-l7f9k     → 10.217.1.31
+  hello-world-5d6d6c8fc9-7pksn → 10.217.1.32
+  hello-world-5d6d6c8fc9-zmhhr → 10.217.1.33
 
 Pod 間通訊（同 Project）：直接連通，無需 Service
 Pod 間通訊（跨 Project）：預設隔離，需 NetworkPolicy 明確允許
@@ -1274,6 +1308,12 @@ oc exec $NGINX_POD -- curl -s -o /dev/null -w "%{http_code}" http://$HW_SVC_IP:8
 oc exec $NGINX_POD -- curl -s -o /dev/null -w "%{http_code}" \
   http://hello-world.demo-app.svc.cluster.local:8080
 # → 200
+```
+
+**實測 Pod 間通訊輸出：**
+```
+nginx Pod → hello-world ClusterIP (10.217.5.222:8080)    → HTTP 200
+nginx Pod → hello-world.demo-app.svc.cluster.local:8080   → HTTP 200
 ```
 
 **DNS 服務發現格式：**
@@ -1330,17 +1370,22 @@ oc expose service my-app --tls-termination=passthrough
 oc expose service my-app --tls-termination=reencrypt
 ```
 
-**實測所有 Route 連線結果：**
+**實測所有 Route 連線結果（本章執行）：**
 ```
-http://nginx-demo-app.apps-crc.testing          → HTTP 200
-http://hello-world-demo-app.apps-crc.testing    → HTTP 200
-http://nodejs-sample-demo-app.apps-crc.testing  → HTTP 200
-https://nginx-tls-demo-app.apps-crc.testing     → HTTP 200 (TLS Edge)
+http://nginx-demo-app.apps-crc.testing         → HTTP 200
+http://hello-world-demo-app.apps-crc.testing   → HTTP 200
+https://nginx-tls-demo-app.apps-crc.testing    → HTTP 200 (TLS Edge)
 ```
 
 ---
 
 ## 15. 常用指令速查表
+
+### Web Console — Deployment 管理
+
+![Deployment 列表](screenshots/ch15-overview.png)
+
+> Deployments 頁面：nginx（2/2）和 hello-world（2/2）全部就緒，顯示可用副本數與建立時間
 
 ### oc vs kubectl
 
