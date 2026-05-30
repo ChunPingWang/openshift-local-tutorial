@@ -15,7 +15,8 @@
 | 第 12 章 | HPA 建立，min=2 max=5 | ✅ 通過 |
 | 第 13 章 | 日誌查看、port-forward、事件監控 | ✅ 通過 |
 | 第 14 章 | Pod 間網路通訊、DNS 發現、NetworkPolicy、TLS Route | ✅ 通過 |
-| 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署 | ✅ 通過 |
+| 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署（Spring Cloud）| ✅ 通過 |
+| 第 17 章 | Istio IngressGateway + Prometheus + Grafana + Jaeger + Kiali | ✅ 通過 |
 
 ## 實際執行截圖
 
@@ -1587,6 +1588,180 @@ containers:
   image: ...
   # 不設 resources.requests → BestEffort QoS
 ```
+
+---
+
+## 17. 實戰：Istio Service Mesh + 完整可觀測性技術棧
+
+> **分支**：`istio` | **Manifest**：`petclinic-istio/`
+
+### 架構對比：Spring Cloud vs Istio
+
+```
+Spring Cloud 分支（branch: spring-cloud）   Istio 分支（branch: istio）
+───────────────────────────────────────    ──────────────────────────────────
+Config Server   → 集中設定管理              ConfigMap → K8s 原生設定
+Eureka          → 服務發現與註冊             K8s DNS   → 原生服務發現
+Spring Gateway  → API 路由                 Istio IngressGateway + VirtualService
+無              → 可觀測性                  Prometheus + Grafana + Jaeger + Kiali
+無              → 熔斷（僅 code 層）         DestinationRule → Istio 熔斷策略
+```
+
+### 部署架構
+
+```
+外部流量
+    │
+    ▼
+OpenShift Route → istio-ingressgateway:80
+    │
+    ▼ Istio VirtualService 路由規則
+    ├── /api/vet/vets         → vets-service:8083
+    ├── /api/customer/owners  → customers-service:8081
+    └── /api/visit/**         → visits-service:8082
+
+可觀測性工具（獨立 Routes）：
+    grafana.apps-crc.testing     → Grafana（儀表板）
+    jaeger.apps-crc.testing      → Jaeger（分散式追蹤）
+    kiali.apps-crc.testing       → Kiali（Service Mesh 拓墣）
+    prometheus.apps-crc.testing  → Prometheus（Metrics）
+```
+
+### 移除的 Spring Cloud 元件
+
+| 移除 | 替代方案 | 優點 |
+|------|---------|------|
+| Config Server | Kubernetes ConfigMap | 語言無關、K8s 原生 |
+| Eureka | K8s DNS (`svc.cluster.local`) | 無需額外服務、零侵入 |
+| Spring Cloud Gateway | Istio VirtualService | 宣告式、支援 A/B 測試 |
+| Resilience4j（code） | Istio DestinationRule | 外部熔斷、無需改程式碼 |
+
+### OpenShift 特性應用
+
+| 特性 | 用途 |
+|------|------|
+| **S2I** | 從 GitHub 建置 3 個業務服務（無基礎設施服務） |
+| **Istio IngressGateway** | 取代 Spring Cloud Gateway |
+| **VirtualService** | 精確路徑路由 + Retry 策略 |
+| **DestinationRule** | 連線池限制 + 熔斷策略 |
+| **Prometheus** | 抓取 `/actuator/prometheus` metrics |
+| **Kiali** | 視覺化 Service Mesh 拓墣 |
+| **Jaeger** | 分散式鏈路追蹤 |
+
+### 部署步驟
+
+```bash
+# 1. 安裝 Istio（minimal profile + IngressGateway）
+cat istio-minimal.yaml | istioctl install --skip-confirmation
+
+# 2. 安裝可觀測性 Addons
+ADDONS="istio-1.22.3/samples/addons"
+oc apply -f $ADDONS/prometheus.yaml
+oc apply -f $ADDONS/grafana.yaml
+oc apply -f $ADDONS/jaeger.yaml
+oc apply -f $ADDONS/kiali.yaml
+
+# 3. 建立 petclinic Project（不啟用 namespace 層級 injection）
+oc new-project petclinic
+oc adm policy add-scc-to-user anyuid -z default -n petclinic
+oc adm policy add-scc-to-user privileged -z default -n petclinic
+
+# 4. S2I 建置（只有 3 個業務服務）
+oc apply -f petclinic-istio/02-buildconfigs.yaml
+oc start-build customers-service vets-service visits-service -n petclinic
+
+# 5. 套用 ConfigMap、Deployment、Service、Istio 路由
+oc apply -f petclinic-istio/01-configmap.yaml
+oc apply -f petclinic-istio/03-deployments.yaml
+oc apply -f petclinic-istio/04-services.yaml
+oc apply -f petclinic-istio/05-istio-routing.yaml
+```
+
+### Istio VirtualService 路由設計
+
+```yaml
+# 取代 Spring Cloud Gateway 的路由規則
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+spec:
+  http:
+  - name: "vets-list"
+    match:
+    - uri:
+        prefix: "/api/vet/vets"
+    rewrite:
+      uri: "/vets"            # 路徑重寫（去除 API prefix）
+    route:
+    - destination:
+        host: vets-service    # K8s DNS 服務發現
+        port:
+          number: 8083
+    timeout: 30s
+    retries:
+      attempts: 3             # 自動重試（取代 Resilience4j）
+```
+
+### DestinationRule 熔斷策略
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+spec:
+  host: customers-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100   # 連線池限制
+    outlierDetection:
+      consecutiveGatewayErrors: 5   # 連續 5 次錯誤觸發熔斷
+      interval: 30s
+      baseEjectionTime: 30s  # 熔斷後隔離 30 秒
+```
+
+### 實測截圖
+
+#### Kiali — Service Mesh 拓墣（petclinic 3 個應用健康）
+
+![Kiali Dashboard](screenshots/istio-kiali.png)
+
+> `http://kiali.apps-crc.testing` — petclinic namespace 顯示 3 個健康應用，Istio Config ✅
+
+#### Grafana — 指標儀表板
+
+![Grafana Dashboard](screenshots/istio-grafana.png)
+
+> `http://grafana.apps-crc.testing` — 已連接 Prometheus，可建立 Spring Boot Actuator Metrics 儀表板
+
+#### Jaeger — 分散式鏈路追蹤
+
+![Jaeger UI](screenshots/istio-jaeger.png)
+
+### 驗證結果
+
+```bash
+# API 透過 Istio IngressGateway 存取（全部 HTTP 200）
+http://petclinic.apps-crc.testing/api/vet/vets              → 200（6 位獸醫）
+http://petclinic.apps-crc.testing/api/customer/owners/1     → 200（飼主資料）
+http://petclinic.apps-crc.testing/api/visit/pets/visits?petId=1 → 200
+
+# 可觀測性工具
+http://grafana.apps-crc.testing      → 200（Grafana）
+http://jaeger.apps-crc.testing       → 200（Jaeger UI）
+http://kiali.apps-crc.testing        → 200（Kiali，petclinic 3 apps ✅）
+http://prometheus.apps-crc.testing   → 200（Prometheus）
+```
+
+### CRC 環境限制說明
+
+> **Istio Sidecar 注入**：CRC 使用 RHCOS 核心，`iptables-restore` 在應用 Pod 內無法操作 NAT table，
+> 導致 Istio init container（`istio-init`）失敗。
+>
+> **正式環境解法**：
+> 1. 安裝 Istio CNI（`cni.enabled=true`）— 在 node 層級設定 iptables，不需要 init container
+> 2. 使用 OpenShift Service Mesh Operator — 已包含所有 OpenShift 相容性修正
+> 3. 使用 Istio Ambient Mode（Istio 1.21+）— 完全無 sidecar 的 Layer 4 mesh
+>
+> 本 PoC 展示 Istio IngressGateway + Observability Stack，sidecar mTLS 需上述修正後才能啟用。
 
 ---
 

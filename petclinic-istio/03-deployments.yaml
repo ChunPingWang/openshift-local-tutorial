@@ -1,0 +1,199 @@
+# ============================================================
+# PetClinic 業務服務 Deployment（Istio Sidecar 注入版）
+# 移除 Spring Cloud 基礎設施，改用 K8s DNS 服務發現
+# Istio Sidecar 自動注入 Envoy Proxy 處理流量
+# ============================================================
+
+# ── Customers Service ─────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customers-service
+  namespace: petclinic
+  labels:
+    app: customers-service
+    version: v1
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: customers-service
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: customers-service
+        version: v1
+      annotations:
+        sidecar.istio.io/inject: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+      - name: customers-service
+        image: image-registry.openshift-image-registry.svc:5000/petclinic/customers-service:latest
+        ports:
+        - containerPort: 8081
+        env:
+        # 停用 Spring Cloud Config Server
+        - name: SPRING_CLOUD_CONFIG_ENABLED
+          value: "false"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:file:/app/config/"
+        # 停用 Eureka（改用 K8s DNS）
+        - name: EUREKA_CLIENT_ENABLED
+          value: "false"
+        - name: SPRING_CLOUD_DISCOVERY_ENABLED
+          value: "false"
+        - name: JAVA_OPTS
+          value: "-Xms64m -Xmx256m"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8081
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8081
+          initialDelaySeconds: 90
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: petclinic-config
+---
+# ── Vets Service ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vets-service
+  namespace: petclinic
+  labels:
+    app: vets-service
+    version: v1
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vets-service
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: vets-service
+        version: v1
+      annotations:
+        sidecar.istio.io/inject: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8083"
+    spec:
+      containers:
+      - name: vets-service
+        image: image-registry.openshift-image-registry.svc:5000/petclinic/vets-service:latest
+        ports:
+        - containerPort: 8083
+        env:
+        - name: SPRING_CLOUD_CONFIG_ENABLED
+          value: "false"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:file:/app/config/"
+        - name: EUREKA_CLIENT_ENABLED
+          value: "false"
+        - name: SPRING_CLOUD_DISCOVERY_ENABLED
+          value: "false"
+        - name: JAVA_OPTS
+          value: "-Xms64m -Xmx256m"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8083
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8083
+          initialDelaySeconds: 90
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: petclinic-config
+---
+# ── Visits Service ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: visits-service
+  namespace: petclinic
+  labels:
+    app: visits-service
+    version: v1
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: visits-service
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: visits-service
+        version: v1
+      annotations:
+        sidecar.istio.io/inject: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8082"
+    spec:
+      containers:
+      - name: visits-service
+        image: image-registry.openshift-image-registry.svc:5000/petclinic/visits-service:latest
+        ports:
+        - containerPort: 8082
+        env:
+        - name: SPRING_CLOUD_CONFIG_ENABLED
+          value: "false"
+        - name: SPRING_CONFIG_IMPORT
+          value: "optional:file:/app/config/"
+        - name: EUREKA_CLIENT_ENABLED
+          value: "false"
+        - name: SPRING_CLOUD_DISCOVERY_ENABLED
+          value: "false"
+        - name: JAVA_OPTS
+          value: "-Xms64m -Xmx256m"
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8082
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8082
+          initialDelaySeconds: 90
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: petclinic-config

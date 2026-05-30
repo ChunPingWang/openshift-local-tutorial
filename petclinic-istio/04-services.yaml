@@ -1,0 +1,49 @@
+# K8s Service（取代 Eureka 服務發現）
+# 服務間透過 DNS 直接連線：vets-service.petclinic.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: customers-service
+  namespace: petclinic
+  labels:
+    app: customers-service
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  selector:
+    app: customers-service
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vets-service
+  namespace: petclinic
+  labels:
+    app: vets-service
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  selector:
+    app: vets-service
+  ports:
+  - name: http
+    port: 8083
+    targetPort: 8083
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: visits-service
+  namespace: petclinic
+  labels:
+    app: visits-service
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  selector:
+    app: visits-service
+  ports:
+  - name: http
+    port: 8082
+    targetPort: 8082

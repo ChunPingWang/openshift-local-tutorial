@@ -1,0 +1,105 @@
+# ============================================================
+# S2I BuildConfig — 只建置業務服務
+# 移除 config-server、discovery-server、api-gateway
+# ============================================================
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: customers-service
+  namespace: petclinic
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: vets-service
+  namespace: petclinic
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: visits-service
+  namespace: petclinic
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: customers-service
+  namespace: petclinic
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/spring-petclinic/spring-petclinic-microservices.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        namespace: openshift
+        name: ubi8-openjdk-17:1.18
+      env:
+        - name: MAVEN_ARGS
+          value: "package -pl spring-petclinic-customers-service -am -DskipTests"
+        - name: ARTIFACT_DIR
+          value: "spring-petclinic-customers-service/target"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: customers-service:latest
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: vets-service
+  namespace: petclinic
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/spring-petclinic/spring-petclinic-microservices.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        namespace: openshift
+        name: ubi8-openjdk-17:1.18
+      env:
+        - name: MAVEN_ARGS
+          value: "package -pl spring-petclinic-vets-service -am -DskipTests"
+        - name: ARTIFACT_DIR
+          value: "spring-petclinic-vets-service/target"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: vets-service:latest
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: visits-service
+  namespace: petclinic
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/spring-petclinic/spring-petclinic-microservices.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        namespace: openshift
+        name: ubi8-openjdk-17:1.18
+      env:
+        - name: MAVEN_ARGS
+          value: "package -pl spring-petclinic-visits-service -am -DskipTests"
+        - name: ARTIFACT_DIR
+          value: "spring-petclinic-visits-service/target"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: visits-service:latest

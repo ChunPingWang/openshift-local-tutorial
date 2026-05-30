@@ -1,0 +1,241 @@
+# ============================================================
+# Istio 流量管理（取代 Spring Cloud Gateway）
+# Gateway：對外入口
+# VirtualService：路由規則
+# DestinationRule：負載均衡 + 熔斷策略
+# ============================================================
+
+# ── Istio Gateway（對外入口）─────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: petclinic-gateway
+  namespace: petclinic
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "petclinic.apps-crc.testing"
+---
+# ── VirtualService（路由規則，取代 Spring Cloud Gateway）─
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: petclinic
+  namespace: petclinic
+spec:
+  hosts:
+  - "petclinic.apps-crc.testing"
+  gateways:
+  - petclinic-gateway
+  http:
+  # Customers API — 精確路徑映射
+  - name: "customers-owners"
+    match:
+    - uri:
+        prefix: "/api/customer/owners"
+    rewrite:
+      uri: "/owners"
+    route:
+    - destination:
+        host: customers-service
+        port:
+          number: 8081
+    timeout: 30s
+    retries:
+      attempts: 3
+      perTryTimeout: 10s
+
+  - name: "customers-pet-types"
+    match:
+    - uri:
+        prefix: "/api/customer/petTypes"
+    rewrite:
+      uri: "/petTypes"
+    route:
+    - destination:
+        host: customers-service
+        port:
+          number: 8081
+    timeout: 30s
+
+  # Vets API
+  - name: "vets-list"
+    match:
+    - uri:
+        prefix: "/api/vet/vets"
+    rewrite:
+      uri: "/vets"
+    route:
+    - destination:
+        host: vets-service
+        port:
+          number: 8083
+    timeout: 30s
+
+  # Visits API
+  - name: "visits-list"
+    match:
+    - uri:
+        prefix: "/api/visit/pets/visits"
+    rewrite:
+      uri: "/pets/visits"
+    route:
+    - destination:
+        host: visits-service
+        port:
+          number: 8082
+    timeout: 30s
+
+  - name: "visits-post"
+    match:
+    - uri:
+        prefix: "/api/visit/owners"
+    rewrite:
+      uri: "/owners"
+    route:
+    - destination:
+        host: visits-service
+        port:
+          number: 8082
+    timeout: 30s
+---
+# ── DestinationRule（熔斷 + 負載均衡策略）────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: customers-service
+  namespace: petclinic
+spec:
+  host: customers-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        h2UpgradePolicy: DO_NOT_UPGRADE
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: vets-service
+  namespace: petclinic
+spec:
+  host: vets-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: visits-service
+  namespace: petclinic
+spec:
+  host: visits-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+# ── OpenShift Route（對接 Istio IngressGateway）──────────
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: petclinic-istio
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: spring-petclinic-istio
+spec:
+  host: petclinic.apps-crc.testing
+  to:
+    kind: Service
+    name: istio-ingressgateway
+  port:
+    targetPort: http2
+---
+# Kiali Route
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: kiali
+  namespace: istio-system
+spec:
+  host: kiali.apps-crc.testing
+  to:
+    kind: Service
+    name: kiali
+  port:
+    targetPort: http
+---
+# Grafana Route
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: grafana
+  namespace: istio-system
+spec:
+  host: grafana.apps-crc.testing
+  to:
+    kind: Service
+    name: grafana
+  port:
+    targetPort: http
+---
+# Jaeger Route
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: jaeger
+  namespace: istio-system
+spec:
+  host: jaeger.apps-crc.testing
+  to:
+    kind: Service
+    name: tracing
+  port:
+    targetPort: http-query
+---
+# Prometheus Route
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: prometheus
+  namespace: istio-system
+spec:
+  host: prometheus.apps-crc.testing
+  to:
+    kind: Service
+    name: prometheus
+  port:
+    targetPort: http

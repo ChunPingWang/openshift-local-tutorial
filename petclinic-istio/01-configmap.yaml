@@ -1,0 +1,38 @@
+# ============================================================
+# 取代 Spring Cloud Config Server
+# 所有服務的共用設定透過 ConfigMap 注入
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: petclinic-config
+  namespace: petclinic
+  labels:
+    app.kubernetes.io/part-of: spring-petclinic-istio
+data:
+  # 共用設定（取代 Config Server 的 application.yml）
+  application.properties: |
+    server.shutdown=graceful
+    spring.sql.init.schema-locations=classpath*:db/hsqldb/schema.sql
+    spring.sql.init.data-locations=classpath*:db/hsqldb/data.sql
+    spring.jpa.open-in-view=false
+    spring.jpa.hibernate.ddl-auto=none
+    management.endpoints.web.exposure.include=*
+    management.endpoint.health.show-details=always
+    management.endpoint.prometheus.enabled=true
+    management.metrics.export.prometheus.enabled=true
+    management.tracing.sampling.probability=1.0
+    logging.level.org.springframework=INFO
+
+  # 取代 Eureka 服務發現：直接使用 K8s DNS 名稱
+  customers.properties: |
+    spring.application.name=customers-service
+    server.port=8081
+
+  vets.properties: |
+    spring.application.name=vets-service
+    server.port=8083
+
+  visits.properties: |
+    spring.application.name=visits-service
+    server.port=8082
