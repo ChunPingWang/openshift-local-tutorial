@@ -17,6 +17,7 @@
 | 第 14 章 | Pod 間網路通訊、DNS 發現、NetworkPolicy、TLS Route | ✅ 通過 |
 | 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署（Spring Cloud）| ✅ 通過 |
 | 第 17 章 | Istio IngressGateway + Prometheus + Grafana + Jaeger + Kiali | ✅ 通過 |
+| 第 18 章 | Keycloak + Istio RequestAuthentication/AuthorizationPolicy/PeerAuthentication mTLS | ✅ 通過 |
 
 ## 實際執行截圖
 
@@ -1841,6 +1842,143 @@ http://prometheus.apps-crc.testing   → 200（Prometheus）
 > 3. 使用 Istio Ambient Mode（Istio 1.21+）— 完全無 sidecar 的 Layer 4 mesh
 >
 > 本 PoC 展示 Istio IngressGateway + Observability Stack，sidecar mTLS 需上述修正後才能啟用。
+
+---
+
+## 18. Istio 原生安全：認證授權與 mTLS
+
+> **分支**：`istio` | **Manifest**：`petclinic-istio/06-keycloak.yaml`、`07-istio-security.yaml`
+
+### 為什麼 Istio 分支也需要 Keycloak？
+
+需要。但整合方式與 Spring Cloud 分支**根本不同** —— Istio 把安全從應用程式碼移到 mesh 層：
+
+| 安全面向 | Spring Cloud 分支 | Istio 分支 |
+|---------|------------------|-----------|
+| JWT 驗證位置 | API Gateway（Spring Security 程式碼） | **RequestAuthentication**（mesh 層，零程式碼） |
+| 角色授權 | `@PreAuthorize` 註解（程式碼） | **AuthorizationPolicy**（宣告式 YAML） |
+| 東西向 mTLS | cert-manager 手動發憑證 + Spring SSL 設定 | **PeerAuthentication STRICT**（Istio 自動發憑證輪換） |
+| 程式碼侵入性 | 需引入 spring-security-oauth2 依賴 | **完全零程式碼** |
+
+```
+Istio 安全三層防護（全部宣告式，無需改動應用程式）：
+
+外部請求 + JWT
+    │
+    ▼
+IngressGateway
+    │ ① RequestAuthentication：驗證 JWT 簽章（Keycloak JWKS）
+    │ ② AuthorizationPolicy：檢查 path / method / roles claim
+    ▼
+業務服務（customers / vets / visits）
+    │ ③ PeerAuthentication STRICT：服務間自動 mTLS
+    ▼
+回應
+```
+
+### ① RequestAuthentication — JWT 驗證（取代 Spring Security）
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: petclinic-jwt
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  jwtRules:
+  - issuer: "http://keycloak.security.svc.cluster.local:8080/realms/petclinic"
+    # Istio 從 JWKS 端點取得公鑰，自動驗證 JWT 簽章
+    jwksUri: ".../realms/petclinic/protocol/openid-connect/certs"
+    forwardOriginalToken: true
+```
+
+### ② AuthorizationPolicy — 基於角色的存取控制（取代 @PreAuthorize）
+
+```yaml
+# 範例：vets 寫入操作需要 vet 或 admin 角色
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-vet-role-for-write
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+  - to:
+    - operation:
+        methods: ["POST", "PUT", "DELETE"]
+        paths: ["/api/vet/*"]
+    when:
+    - key: request.auth.claims[roles]   # 讀取 JWT 的 roles claim
+      values: ["vet", "admin"]
+```
+
+### ③ PeerAuthentication — 東西向 mTLS（取代 cert-manager）
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: petclinic-mtls
+  namespace: petclinic
+spec:
+  mtls:
+    mode: STRICT   # Istio 自動發放、輪換、驗證憑證，無需 cert-manager
+```
+
+> **對比優勢**：Spring Cloud 分支用 cert-manager 需手動定義每個服務的 Certificate、轉換 PKCS12、設定 Spring SSL；  
+> Istio 只需一個 `PeerAuthentication: STRICT`，所有 sidecar 自動互相 mTLS。
+
+### Keycloak JWT 流程實測
+
+```bash
+# 1. 取得 alice 的 JWT
+TOKEN=$(curl -s -X POST \
+  http://keycloak.apps-crc.testing/realms/petclinic/protocol/openid-connect/token \
+  -d "grant_type=password&client_id=petclinic-gateway&client_secret=..." \
+  -d "username=alice&password=alice123" | jq -r .access_token)
+
+# 2. 帶 JWT 存取（Istio IngressGateway 自動驗證）
+curl -H "Authorization: Bearer $TOKEN" \
+  http://petclinic.apps-crc.testing/api/vet/vets
+```
+
+**實測 JWT roles claim（AuthorizationPolicy 的驗證依據）：**
+```
+alice  → roles: ['user']
+bob    → roles: ['vet']
+admin  → roles: ['vet', 'admin', 'user']
+```
+
+> 解碼 JWT payload 確認包含 `iss`（issuer）、`preferred_username`、`roles` 三個關鍵欄位，  
+> 對應 RequestAuthentication 的 issuer 比對與 AuthorizationPolicy 的 `request.auth.claims[roles]` 檢查。
+
+### 截圖
+
+#### Keycloak — Spring PetClinic Realm
+
+![Keycloak Realm](screenshots/ch18-keycloak-realm.png)
+
+#### Keycloak — Users（alice / bob / admin，各帶不同角色）
+
+![Keycloak Users](screenshots/ch18-keycloak-users.png)
+
+#### Keycloak — Realm Roles（user / vet / admin）
+
+![Keycloak Roles](screenshots/ch18-keycloak-roles.png)
+
+### CRC 環境說明
+
+> JWT 驗證（RequestAuthentication）與授權（AuthorizationPolicy）在 **IngressGateway 層**運作，
+> 不依賴應用 Pod 的 sidecar，因此在 CRC 上可完整驗證。
+>
+> mTLS（PeerAuthentication STRICT）需要應用 Pod 注入 sidecar，受前述 CRC iptables 限制影響，
+> 需改用 Istio CNI 或 OpenShift Service Mesh Operator 後才能完整啟用。
 
 ---
 

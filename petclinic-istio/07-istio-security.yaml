@@ -1,0 +1,137 @@
+# ============================================================
+# Istio 原生安全（取代 Spring Security 程式碼 + cert-manager）
+#
+# 三層防護：
+#   1. RequestAuthentication：驗證 JWT 簽章（Keycloak JWKS）
+#   2. AuthorizationPolicy：基於 JWT claims 的存取控制
+#   3. PeerAuthentication：服務間 mTLS（Istio 自動憑證）
+#
+# 關鍵差異 vs Spring Cloud：
+#   完全零程式碼，所有安全策略宣告式定義在 mesh 層
+# ============================================================
+
+# ── 1. RequestAuthentication — JWT 驗證 ──────────────────
+# 在 IngressGateway 驗證來自 Keycloak 的 JWT
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: petclinic-jwt
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  jwtRules:
+  - issuer: "http://keycloak.security.svc.cluster.local:8080/realms/petclinic"
+    # Keycloak JWKS 端點（取得公鑰驗證 JWT 簽章）
+    jwksUri: "http://keycloak.security.svc.cluster.local:8080/realms/petclinic/protocol/openid-connect/certs"
+    # 也接受外部 issuer（透過 Route 取得的 token）
+    audiences:
+    - "petclinic-istio"
+    - "account"
+    forwardOriginalToken: true  # 將 JWT 轉發給後端服務
+---
+# ── 2. AuthorizationPolicy — 存取控制 ────────────────────
+# 規則 1：健康檢查與公開端點不需驗證
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-public-paths
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+  - to:
+    - operation:
+        paths:
+        - "/"
+        - "/actuator/health*"
+        - "/webjars/*"
+        - "/resources/*"
+---
+# 規則 2：API 端點需要有效 JWT
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-jwt-for-api
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        requestPrincipals: ["*"]  # 任何有效 JWT 主體
+    to:
+    - operation:
+        paths: ["/api/*"]
+---
+# 規則 3：vets 寫入操作需要 vet 或 admin 角色
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-vet-role-for-write
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        requestPrincipals: ["*"]
+    to:
+    - operation:
+        methods: ["POST", "PUT", "DELETE"]
+        paths: ["/api/vet/*"]
+    when:
+    - key: request.auth.claims[roles]
+      values: ["vet", "admin"]
+---
+# ── 3. PeerAuthentication — 東西向 mTLS ──────────────────
+# 強制 petclinic namespace 內所有服務間通訊使用 mTLS
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: petclinic-mtls
+  namespace: petclinic
+spec:
+  mtls:
+    mode: STRICT  # 強制 mTLS（Istio 自動發放並輪換憑證）
+---
+# DestinationRule 配合：對 petclinic 服務使用 ISTIO_MUTUAL TLS
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: petclinic-mtls
+  namespace: petclinic
+spec:
+  host: "*.petclinic.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL  # 使用 Istio 管理的 mTLS 憑證
+---
+# ── 4. NetworkPolicy — 額外的 L3/L4 隔離 ─────────────────
+# 即使 mTLS 加密，仍用 NetworkPolicy 限制可連線的來源
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-istio-ingress
+  namespace: petclinic
+spec:
+  podSelector: {}
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: istio-system
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: petclinic
