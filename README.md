@@ -63,6 +63,7 @@ oc scale deployment --all -n <namespace> --replicas=0   # 暫時釋放
 | 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署 | ✅ 通過 |
 | 第 17 章 | 完整可觀測性技術棧（Prometheus/Grafana/AlertManager/OTel/Zipkin/Loki） | ✅ 通過 |
 | 第 18 章 | Keycloak OAuth2/OIDC 認證、cert-manager mTLS、N-S/E-W 流量管控 | ✅ 通過 |
+| 第 19 章 | CI/CD：Tekton Pipelines（2 映像建置）+ ArgoCD GitOps（3 App） | ✅ 通過 |
 
 ## 實際執行截圖
 
@@ -1980,6 +1981,112 @@ tls:
 | E-W 加密 | cert-manager mTLS | ✅（Manifest 完成） |
 | E-W 隔離 | NetworkPolicy | ✅ |
 | E-W Metrics 抓取 | 跨 Namespace NetworkPolicy | ✅ |
+
+---
+
+## 19. CI/CD：Tekton Pipelines + ArgoCD GitOps
+
+> **分支**：`spring-cloud` | **Manifest**：`spring-cloud-stack/cicd/`
+
+取代手動 `oc start-build` / `oc apply`，用 OpenShift 原生 CI/CD 達成自動化：
+
+```
+┌─ CI（持續整合）：OpenShift Pipelines (Tekton) ──────────┐
+│  git push → Pipeline：git-clone → S2I build（並行）     │
+│           → 映像推送到內建 Registry                      │
+└─────────────────────────────────────────────────────────┘
+                          │
+┌─ CD（持續部署）：OpenShift GitOps (ArgoCD) ─────────────┐
+│  ArgoCD 監控 Git repo → 偵測差異 → 自動同步 manifest    │
+│  selfHeal：手動改動會被還原為 Git 狀態                  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 安裝（一鍵腳本）
+
+```bash
+./spring-cloud-stack/cicd/04-install-cicd.sh
+# 內含：安裝 2 個 Operator → BuildConfig → Pipeline → ArgoCD App → 觸發 PipelineRun
+```
+
+### Tekton Pipeline 設計
+
+```yaml
+# Pipeline：fetch-source → 並行建置 3 個業務服務
+tasks:
+- name: fetch-source         # git-clone Task
+- name: build-customers      # S2I binary build（runAfter: fetch-source）
+- name: build-vets           # 並行
+- name: build-visits         # 並行
+```
+
+**自訂 Task — S2I 二進位建置**（從 workspace 原始碼）：
+```yaml
+- name: start-build
+  script: |
+    oc start-build $(params.SERVICE) \
+      --from-dir=$(workspaces.source.path) --follow --wait
+    oc set image deployment/$(params.SERVICE) ...
+```
+
+### Tekton 驗證結果（實測）
+
+```
+PipelineRun: petclinic-cicd-run-xxx
+  ✅ fetch-source     Succeeded   （git-clone）
+  ✅ build-customers  Succeeded   → customers-service:latest 已推送
+  ✅ build-vets       Succeeded   → vets-service:latest 已推送
+  ⏳ build-visits     Running     （CRC CPU 受限，並行建置較慢）
+
+# 確認映像已產生
+oc get imagestreamtag -n petclinic | grep -E "customers|vets"
+#   customers-service:latest   ...registry.../petclinic/customers-service
+#   vets-service:latest        ...registry.../petclinic/vets-service
+```
+
+### ArgoCD GitOps 設計
+
+```yaml
+# Application：監控 Git repo 的 petclinic/ 目錄
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  source:
+    repoURL: https://github.com/ChunPingWang/openshift-local-tutorial.git
+    targetRevision: spring-cloud
+    path: petclinic
+  syncPolicy:
+    automated:
+      prune: true        # 自動刪除 Git 移除的資源
+      selfHeal: true     # 手動改動自動還原
+```
+
+### ArgoCD 截圖（3 個 Application 監控不同路徑）
+
+![ArgoCD Applications](screenshots/ch19-argocd-apps.png)
+
+> ArgoCD UI 顯示 3 個 Application，全部從 GitHub repo 監控：
+> - `petclinic-app` → `petclinic/` 路徑
+> - `petclinic-observability` → `spring-cloud-stack/observability/`
+> - `petclinic-root` → App-of-Apps 模式（Healthy）
+>
+> Status 顯示 **OutOfSync**（ArgoCD 正確偵測到 Git 與叢集的差異，可一鍵 Sync）
+
+### CI/CD 驗證清單
+
+| 機制 | 元件 | 狀態 |
+|------|------|------|
+| CI — 原始碼 clone | Tekton git-clone Task | ✅ Succeeded |
+| CI — S2I 建置 | Tekton + 內建 Registry | ✅ 2 映像已推送 |
+| CI — 並行建置 | Pipeline fan-out | ✅ 驗證 |
+| CI — Webhook 觸發 | Tekton Triggers / EventListener | ✅ Manifest 完成 |
+| CD — Git 監控 | ArgoCD Application | ✅ 3 個 App |
+| CD — 差異偵測 | ArgoCD OutOfSync | ✅ 驗證 |
+| CD — 自動修復 | ArgoCD selfHeal | ✅ 設定 |
+
+> **CRC 資源說明**：ArgoCD application-controller 預設 request 250m CPU / 1Gi RAM，
+> 在 CRC CPU 滿載時會卡 Pending。本 PoC 透過調降 ArgoCD CR 的 resource requests
+> （controller 50m、repo 50m 等）讓其在 CRC 上順利運行 —— 詳見資源建議章節。
 
 ---
 
