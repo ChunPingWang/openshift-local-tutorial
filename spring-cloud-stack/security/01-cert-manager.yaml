@@ -1,0 +1,133 @@
+# ============================================================
+# cert-manager — 自動化憑證管理
+# 為每個微服務發放 TLS 憑證，實現 mTLS 東西向加密
+# ============================================================
+
+# ── cert-manager Namespace & 安裝 ─────────────────────────
+# 正式安裝方式：
+# kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+#
+# 在 OpenShift 上：
+# oc apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+
+# ── 自簽 CA（ClusterIssuer）─────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: petclinic-ca-issuer
+spec:
+  selfSigned: {}
+---
+# 先用 selfSigned 發一個 CA 憑證
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: petclinic-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: petclinic-ca
+  secretName: petclinic-ca-secret
+  subject:
+    organizations:
+    - PetClinic Demo
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: petclinic-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# 以 CA 憑證建立 ClusterIssuer（供所有服務使用）
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: petclinic-issuer
+spec:
+  ca:
+    secretName: petclinic-ca-secret
+---
+# ── petclinic namespace 各服務憑證 ────────────────────────
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: customers-service-cert
+  namespace: petclinic
+spec:
+  secretName: customers-service-tls
+  duration: 2160h   # 90 天
+  renewBefore: 360h # 15 天前更新
+  commonName: customers-service.petclinic.svc.cluster.local
+  dnsNames:
+  - customers-service
+  - customers-service.petclinic
+  - customers-service.petclinic.svc
+  - customers-service.petclinic.svc.cluster.local
+  issuerRef:
+    name: petclinic-issuer
+    kind: ClusterIssuer
+  usages:
+  - server auth
+  - client auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vets-service-cert
+  namespace: petclinic
+spec:
+  secretName: vets-service-tls
+  commonName: vets-service.petclinic.svc.cluster.local
+  dnsNames:
+  - vets-service
+  - vets-service.petclinic
+  - vets-service.petclinic.svc
+  - vets-service.petclinic.svc.cluster.local
+  issuerRef:
+    name: petclinic-issuer
+    kind: ClusterIssuer
+  usages:
+  - server auth
+  - client auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: visits-service-cert
+  namespace: petclinic
+spec:
+  secretName: visits-service-tls
+  commonName: visits-service.petclinic.svc.cluster.local
+  dnsNames:
+  - visits-service
+  - visits-service.petclinic
+  - visits-service.petclinic.svc
+  - visits-service.petclinic.svc.cluster.local
+  issuerRef:
+    name: petclinic-issuer
+    kind: ClusterIssuer
+  usages:
+  - server auth
+  - client auth
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: api-gateway-cert
+  namespace: petclinic
+spec:
+  secretName: api-gateway-tls
+  commonName: api-gateway.petclinic.svc.cluster.local
+  dnsNames:
+  - api-gateway
+  - api-gateway.petclinic
+  - api-gateway.petclinic.svc
+  - api-gateway.petclinic.svc.cluster.local
+  - petclinic.apps-crc.testing  # 南北向 Route hostname
+  issuerRef:
+    name: petclinic-issuer
+    kind: ClusterIssuer
+  usages:
+  - server auth
+  - client auth

@@ -1,0 +1,284 @@
+# ============================================================
+# EFK Stack — Elasticsearch + Fluentd + Kibana
+# 注意：資源需求較高（Elasticsearch 需 2GB+ RAM）
+# CRC 環境建議改用 04-loki-stack.yaml（輕量版）
+# 本檔案適用於正式/測試環境
+# ============================================================
+
+# ── Elasticsearch ─────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: observability
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      initContainers:
+      - name: fix-permissions
+        image: busybox:1.36
+        command: ['sh', '-c', 'chown -R 1000:1000 /usr/share/elasticsearch/data']
+        volumeMounts:
+        - name: es-data
+          mountPath: /usr/share/elasticsearch/data
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+        env:
+        - name: discovery.type
+          value: single-node
+        - name: ES_JAVA_OPTS
+          value: "-Xms512m -Xmx512m"
+        - name: xpack.security.enabled
+          value: "false"
+        - name: xpack.security.http.ssl.enabled
+          value: "false"
+        ports:
+        - containerPort: 9200
+          name: http
+        - containerPort: 9300
+          name: transport
+        volumeMounts:
+        - name: es-data
+          mountPath: /usr/share/elasticsearch/data
+        readinessProbe:
+          httpGet:
+            path: /_cluster/health
+            port: 9200
+          initialDelaySeconds: 60
+          periodSeconds: 15
+  volumeClaimTemplates:
+  - metadata:
+      name: es-data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: observability
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+  - name: transport
+    port: 9300
+    targetPort: 9300
+---
+# ── Kibana ────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: observability
+  labels:
+    app: kibana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: docker.elastic.co/kibana/kibana:8.13.4
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "http://elasticsearch:9200"
+        - name: SERVER_BASEPATH
+          value: ""
+        ports:
+        - containerPort: 5601
+        readinessProbe:
+          httpGet:
+            path: /api/status
+            port: 5601
+          initialDelaySeconds: 60
+          periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: observability
+spec:
+  selector:
+    app: kibana
+  ports:
+  - port: 5601
+    targetPort: 5601
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: kibana
+  namespace: observability
+spec:
+  host: kibana.apps-crc.testing
+  to:
+    kind: Service
+    name: kibana
+  port:
+    targetPort: 5601
+---
+# ── Fluentd ConfigMap ─────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: observability
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      path /var/log/containers/*petclinic*.log,/var/log/containers/*observability*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_type string
+          time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+          keep_time_key false
+        </pattern>
+        <pattern>
+          format /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+          time_format '%Y-%m-%dT%H:%M:%S.%N%:z'
+        </pattern>
+      </parse>
+    </source>
+
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+    </filter>
+
+    <filter kubernetes.**>
+      @type record_transformer
+      <record>
+        app ${record.dig("kubernetes", "labels", "app") || "unknown"}
+        namespace ${record.dig("kubernetes", "namespace_name") || "unknown"}
+        pod ${record.dig("kubernetes", "pod_name") || "unknown"}
+      </record>
+    </filter>
+
+    <match kubernetes.**>
+      @type elasticsearch
+      host elasticsearch.observability.svc.cluster.local
+      port 9200
+      logstash_format true
+      logstash_prefix petclinic-logs
+      include_timestamp true
+      <buffer>
+        flush_interval 5s
+        retry_max_times 3
+      </buffer>
+    </match>
+---
+# ── Fluentd DaemonSet ─────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: observability
+  labels:
+    app: fluentd
+spec:
+  selector:
+    matchLabels:
+      app: fluentd
+  template:
+    metadata:
+      labels:
+        app: fluentd
+    spec:
+      serviceAccountName: fluentd
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1.16-debian-elasticsearch8-1
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: "elasticsearch.observability.svc.cluster.local"
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: "9200"
+        - name: FLUENT_ELASTICSEARCH_SCHEME
+          value: "http"
+        - name: FLUENT_ELASTICSEARCH_SSL_VERIFY
+          value: "false"
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: config
+          mountPath: /fluentd/etc/fluent.conf
+          subPath: fluent.conf
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: config
+        configMap:
+          name: fluentd-config
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentd
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluentd
+rules:
+- apiGroups: [""]
+  resources: [pods, namespaces]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluentd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluentd
+subjects:
+- kind: ServiceAccount
+  name: fluentd
+  namespace: observability

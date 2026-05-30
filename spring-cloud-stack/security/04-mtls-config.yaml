@@ -1,0 +1,93 @@
+# ============================================================
+# mTLS 東西向加密設定
+# cert-manager 發放憑證後，Spring Boot 服務掛載並啟用 HTTPS
+# ============================================================
+
+# ── Spring Boot mTLS 設定 ConfigMap ──────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mtls-spring-config
+  namespace: petclinic
+data:
+  # 業務服務啟用 HTTPS server（東西向接收端）
+  application-mtls.yml: |
+    server:
+      ssl:
+        enabled: true
+        key-store-type: PKCS12
+        # cert-manager 產生的 Secret 內含 tls.crt 和 tls.key
+        key-store: /etc/ssl/certs/tls.p12
+        key-store-password: changeit
+        client-auth: want  # 要求但不強制 client cert
+        trust-store: /etc/ssl/certs/ca.p12
+        trust-store-password: changeit
+
+    # Spring RestTemplate/WebClient mTLS client 設定
+    petclinic:
+      mtls:
+        enabled: true
+        key-store: classpath:client-keystore.p12
+        trust-store: classpath:truststore.p12
+
+  # 將 cert-manager PEM 轉換為 PKCS12 的 init script
+  convert-certs.sh: |
+    #!/bin/sh
+    # 將 cert-manager 產生的 PEM 憑證轉為 PKCS12
+    openssl pkcs12 -export \
+      -in /tmp/certs/tls.crt \
+      -inkey /tmp/certs/tls.key \
+      -out /etc/ssl/certs/tls.p12 \
+      -passout pass:changeit
+
+    # 匯入 CA 到 truststore
+    keytool -import -trustcacerts -noprompt \
+      -alias petclinic-ca \
+      -file /tmp/certs/ca.crt \
+      -keystore /etc/ssl/certs/ca.p12 \
+      -storepass changeit \
+      -storetype PKCS12
+---
+# ── customers-service Deployment with mTLS ───────────────
+# 範例：展示如何在 Deployment 中掛載 cert-manager 憑證
+# （完整 Deployment 見 petclinic/ 目錄）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mtls-deployment-example
+  namespace: petclinic
+data:
+  example: |
+    # 在 Deployment spec 中加入以下設定：
+    spec:
+      initContainers:
+      - name: cert-converter
+        image: openjdk:17-jre
+        command: ["/bin/sh", "/scripts/convert-certs.sh"]
+        volumeMounts:
+        - name: tls-certs      # cert-manager 產生的 Secret
+          mountPath: /tmp/certs
+        - name: converted-certs
+          mountPath: /etc/ssl/certs
+        - name: scripts
+          mountPath: /scripts
+      containers:
+      - name: app
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "docker,mtls"
+        volumeMounts:
+        - name: converted-certs
+          mountPath: /etc/ssl/certs
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: customers-service-tls  # cert-manager 建立
+      - name: converted-certs
+        emptyDir: {}
+      - name: scripts
+        configMap:
+          name: mtls-spring-config
+          items:
+          - key: convert-certs.sh
+            path: convert-certs.sh

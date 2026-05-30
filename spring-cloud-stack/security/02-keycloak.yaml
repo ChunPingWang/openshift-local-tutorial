@@ -1,0 +1,174 @@
+# ============================================================
+# Keycloak — OAuth2/OIDC 認證與授權（AA）
+# 架構：
+#   南北向：外部 → Route → API Gateway → Keycloak 驗證 → 業務服務
+#   API Gateway 作為 OAuth2 Resource Server 驗證 JWT
+# ============================================================
+
+# ── Keycloak ConfigMap（Realm 初始化）──────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  namespace: security
+data:
+  petclinic-realm.json: |
+    {
+      "realm": "petclinic",
+      "enabled": true,
+      "displayName": "Spring PetClinic",
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "clients": [
+        {
+          "clientId": "petclinic-gateway",
+          "name": "PetClinic API Gateway",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "petclinic-gateway-secret",
+          "bearerOnly": false,
+          "publicClient": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": true,
+          "serviceAccountsEnabled": true,
+          "redirectUris": ["http://petclinic.apps-crc.testing/*"],
+          "webOrigins": ["http://petclinic.apps-crc.testing"],
+          "protocol": "openid-connect",
+          "protocolMappers": [
+            {
+              "name": "roles",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-realm-role-mapper",
+              "config": {
+                "access.token.claim": "true",
+                "claim.name": "roles",
+                "multivalued": "true"
+              }
+            }
+          ]
+        },
+        {
+          "clientId": "grafana",
+          "name": "Grafana",
+          "enabled": true,
+          "publicClient": false,
+          "secret": "grafana-secret",
+          "standardFlowEnabled": true,
+          "redirectUris": ["http://grafana.apps-crc.testing/*"]
+        }
+      ],
+      "roles": {
+        "realm": [
+          {"name": "user", "description": "一般使用者"},
+          {"name": "vet", "description": "獸醫"},
+          {"name": "admin", "description": "管理員"}
+        ]
+      },
+      "users": [
+        {
+          "username": "alice",
+          "email": "alice@petclinic.local",
+          "enabled": true,
+          "credentials": [{"type": "password", "value": "alice123", "temporary": false}],
+          "realmRoles": ["user"]
+        },
+        {
+          "username": "bob",
+          "email": "bob@petclinic.local",
+          "enabled": true,
+          "credentials": [{"type": "password", "value": "bob123", "temporary": false}],
+          "realmRoles": ["vet"]
+        },
+        {
+          "username": "admin",
+          "email": "admin@petclinic.local",
+          "enabled": true,
+          "credentials": [{"type": "password", "value": "admin123", "temporary": false}],
+          "realmRoles": ["admin", "user", "vet"]
+        }
+      ]
+    }
+---
+# ── Keycloak Deployment ───────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: security
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:24.0.4
+        args:
+        - start-dev
+        - --import-realm
+        env:
+        - name: KEYCLOAK_ADMIN
+          value: "admin"
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          value: "admin123"
+        - name: KC_PROXY
+          value: "edge"
+        - name: KC_HOSTNAME_STRICT
+          value: "false"
+        - name: KC_HTTP_RELATIVE_PATH
+          value: "/"
+        - name: JAVA_OPTS_APPEND
+          value: "-Xms128m -Xmx512m"
+        ports:
+        - containerPort: 8080
+          name: http
+        volumeMounts:
+        - name: realm-config
+          mountPath: /opt/keycloak/data/import
+        readinessProbe:
+          httpGet:
+            path: /realms/petclinic
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          failureThreshold: 10
+      volumes:
+      - name: realm-config
+        configMap:
+          name: keycloak-realm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: security
+spec:
+  selector:
+    app: keycloak
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keycloak
+  namespace: security
+spec:
+  host: keycloak.apps-crc.testing
+  to:
+    kind: Service
+    name: keycloak
+  port:
+    targetPort: 8080

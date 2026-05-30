@@ -1,0 +1,128 @@
+# ============================================================
+# 南北向（N-S）與東西向（E-W）流量管控
+# ============================================================
+#
+# 南北向（North-South）：
+#   外部請求 → OpenShift Route（TLS Edge）
+#            → API Gateway（OAuth2 Resource Server）
+#            → Keycloak JWT 驗證
+#            → 業務服務
+#
+# 東西向（East-West）：
+#   服務間 → mTLS（cert-manager 憑證）
+#          → NetworkPolicy（限制可通訊的服務）
+
+# ── NetworkPolicy：限制東西向流量 ────────────────────────
+# 只允許 api-gateway 訪問業務服務
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-services
+  namespace: petclinic
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: api-gateway
+    ports:
+    - protocol: TCP
+      port: 8081  # customers-service
+    - protocol: TCP
+      port: 8082  # visits-service
+    - protocol: TCP
+      port: 8083  # vets-service
+---
+# 允許 observability namespace 的 Prometheus 抓取 metrics
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: petclinic
+spec:
+  podSelector: {}  # 所有 Pod
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: petclinic-observability
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+    - protocol: TCP
+      port: 8082
+    - protocol: TCP
+      port: 8083
+    - protocol: TCP
+      port: 8761  # Eureka
+    - protocol: TCP
+      port: 8888  # Config Server
+    - protocol: TCP
+      port: 9090  # Admin Server
+---
+# 允許同 namespace 服務間通訊
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-petclinic
+  namespace: petclinic
+spec:
+  podSelector: {}
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: petclinic
+---
+# ── OpenShift Route（南北向 TLS 終端）────────────────────
+# API Gateway 使用 TLS Edge（Router 終止 TLS）
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: petclinic-secure
+  namespace: petclinic
+  annotations:
+    # 強制 HTTPS 重定向
+    haproxy.router.openshift.io/redirect-to-https: "true"
+    # 速率限制（防 DDoS）
+    haproxy.router.openshift.io/rate-limit-connections: "true"
+    haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "100"
+    haproxy.router.openshift.io/rate-limit-connections.rate-tcp: "200"
+spec:
+  host: petclinic.apps-crc.testing
+  to:
+    kind: Service
+    name: api-gateway
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+# ── API Gateway OAuth2 ConfigMap ─────────────────────────
+# Spring Cloud Gateway 設定（掛載到 api-gateway Deployment）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-security-config
+  namespace: petclinic
+data:
+  application-security.yml: |
+    spring:
+      security:
+        oauth2:
+          resourceserver:
+            jwt:
+              # Keycloak 的 JWKS 端點（驗證 JWT 簽名）
+              jwk-set-uri: http://keycloak.security.svc.cluster.local:8080/realms/petclinic/protocol/openid-connect/certs
+              issuer-uri: http://keycloak.security.svc.cluster.local:8080/realms/petclinic
+
+    # Spring Cloud Gateway 路由加入 Token Relay
+    # 讓 JWT 在轉發給業務服務時一起傳遞
+    spring.cloud.gateway.default-filters:
+      - TokenRelay

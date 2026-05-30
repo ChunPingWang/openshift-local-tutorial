@@ -1,0 +1,446 @@
+# ============================================================
+# Prometheus + AlertManager + Grafana
+# Spring Boot Actuator 的 /actuator/prometheus 端點自動被抓取
+# ============================================================
+
+# ── Prometheus ConfigMap ──────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager:9093']
+
+    rule_files:
+      - /etc/prometheus/rules/*.yaml
+
+    scrape_configs:
+      # Prometheus 自身
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # Spring Boot 微服務（透過 Kubernetes 服務發現）
+      - job_name: 'spring-boot-petclinic'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ['petclinic']
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: application
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+  petclinic-alerts.yaml: |
+    groups:
+    - name: petclinic
+      rules:
+      - alert: ServiceDown
+        expr: up{job="spring-boot-petclinic"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PetClinic 服務下線"
+          description: "{{ $labels.application }} 已下線超過 1 分鐘"
+
+      - alert: HighMemoryUsage
+        expr: |
+          jvm_memory_used_bytes{area="heap"} /
+          jvm_memory_max_bytes{area="heap"} > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JVM Heap 使用率過高"
+          description: "{{ $labels.application }} heap 使用率超過 80%"
+
+      - alert: HighErrorRate
+        expr: |
+          rate(http_server_requests_seconds_count{status=~"5.."}[5m]) /
+          rate(http_server_requests_seconds_count[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 5xx 錯誤率過高"
+          description: "{{ $labels.application }} 5xx 錯誤率超過 5%"
+---
+# ── Prometheus RBAC（讀取 Pod 資訊）────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources: [nodes, nodes/metrics, services, endpoints, pods]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get]
+- nonResourceURLs: [/metrics, /metrics/cadvisor]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: observability
+---
+# ── Prometheus Deployment ────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.51.2
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --storage.tsdb.retention.time=7d
+        - --web.enable-lifecycle
+        - --web.enable-admin-api
+        ports:
+        - containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: rules
+          mountPath: /etc/prometheus/rules
+        - name: storage
+          mountPath: /prometheus
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+          items:
+          - key: prometheus.yml
+            path: prometheus.yml
+      - name: rules
+        configMap:
+          name: prometheus-config
+          items:
+          - key: petclinic-alerts.yaml
+            path: petclinic-alerts.yaml
+      - name: storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: observability
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: prometheus
+  namespace: observability
+spec:
+  host: prometheus.apps-crc.testing
+  to:
+    kind: Service
+    name: prometheus
+  port:
+    targetPort: 9090
+---
+# ── AlertManager ConfigMap ────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: observability
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+      smtp_from: 'alertmanager@petclinic.local'
+      smtp_smarthost: 'localhost:587'
+
+    route:
+      group_by: ['alertname', 'application', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: 'default-receiver'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-receiver'
+        continue: true
+      - match:
+          severity: warning
+        receiver: 'default-receiver'
+
+    receivers:
+    - name: 'default-receiver'
+      webhook_configs:
+      - url: 'http://localhost:5001/alerts'
+        send_resolved: true
+
+    - name: 'critical-receiver'
+      webhook_configs:
+      - url: 'http://localhost:5001/alerts/critical'
+        send_resolved: true
+
+    inhibit_rules:
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'application']
+---
+# ── AlertManager Deployment ───────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: observability
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:v0.27.0
+        args:
+        - --config.file=/etc/alertmanager/alertmanager.yml
+        - --storage.path=/alertmanager
+        - --web.external-url=http://alertmanager.apps-crc.testing
+        ports:
+        - containerPort: 9093
+        volumeMounts:
+        - name: config
+          mountPath: /etc/alertmanager
+        - name: storage
+          mountPath: /alertmanager
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9093
+          initialDelaySeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: alertmanager-config
+      - name: storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: observability
+spec:
+  selector:
+    app: alertmanager
+  ports:
+  - port: 9093
+    targetPort: 9093
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: alertmanager
+  namespace: observability
+spec:
+  host: alertmanager.apps-crc.testing
+  to:
+    kind: Service
+    name: alertmanager
+  port:
+    targetPort: 9093
+---
+# ── Grafana ConfigMap ─────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: observability
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+    - name: Prometheus
+      type: prometheus
+      url: http://prometheus:9090
+      access: proxy
+      isDefault: true
+      jsonData:
+        timeInterval: "15s"
+    - name: Loki
+      type: loki
+      url: http://loki:3100
+      access: proxy
+      jsonData:
+        maxLines: 1000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-config
+  namespace: observability
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+    - name: 'petclinic'
+      orgId: 1
+      folder: 'PetClinic'
+      type: file
+      disableDeletion: false
+      options:
+        path: /var/lib/grafana/dashboards
+---
+# ── Grafana Deployment ────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: observability
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:10.4.2
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "petclinic"
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "false"
+        # Keycloak OAuth2 整合
+        - name: GF_AUTH_GENERIC_OAUTH_ENABLED
+          value: "false"  # 部署 Keycloak 後改為 true
+        - name: GF_AUTH_GENERIC_OAUTH_NAME
+          value: "Keycloak"
+        - name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID
+          value: "grafana"
+        - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
+          value: "http://keycloak.security.svc.cluster.local:8080/realms/petclinic/protocol/openid-connect/auth"
+        - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
+          value: "http://keycloak.security.svc.cluster.local:8080/realms/petclinic/protocol/openid-connect/token"
+        ports:
+        - containerPort: 3000
+        volumeMounts:
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        - name: dashboards-config
+          mountPath: /etc/grafana/provisioning/dashboards
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+      volumes:
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+      - name: dashboards-config
+        configMap:
+          name: grafana-dashboards-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  host: grafana.apps-crc.testing
+  to:
+    kind: Service
+    name: grafana
+  port:
+    targetPort: 3000

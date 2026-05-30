@@ -16,6 +16,8 @@
 | 第 13 章 | 日誌查看、port-forward、事件監控 | ✅ 通過 |
 | 第 14 章 | Pod 間網路通訊、DNS 發現、NetworkPolicy、TLS Route | ✅ 通過 |
 | 第 16 章 | Spring PetClinic 微服務 S2I 建置與完整部署 | ✅ 通過 |
+| 第 17 章 | 完整可觀測性技術棧（Prometheus/Grafana/AlertManager/OTel/Zipkin/Loki） | ✅ 通過 |
+| 第 18 章 | Keycloak OAuth2/OIDC 認證、cert-manager mTLS、N-S/E-W 流量管控 | ✅ 通過 |
 
 ## 實際執行截圖
 
@@ -1655,6 +1657,214 @@ containers:
 - [Red Hat 互動學習平台](https://developers.redhat.com/learn)
 - [Kubernetes 官方文件](https://kubernetes.io/docs/)
 - [OperatorHub](https://operatorhub.io/)
+
+---
+
+---
+
+## 17. 完整可觀測性技術棧
+
+> **分支**：`spring-cloud` | **Manifest**：`spring-cloud-stack/observability/`
+
+### 技術棧架構
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    可觀測性三大支柱                           │
+│                                                             │
+│  Metrics（指標）      Logs（日誌）       Traces（追蹤）       │
+│  ┌──────────────┐   ┌──────────────┐   ┌───────────────┐  │
+│  │  Prometheus  │   │     Loki     │   │    Zipkin     │  │
+│  │  + Alert     │   │  + Promtail  │   │  + OTel       │  │
+│  │  Manager     │   │  (DaemonSet) │   │  Collector    │  │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬────────┘  │
+│         └──────────────────┴──────────────────┘           │
+│                             │                              │
+│                      ┌──────▼───────┐                      │
+│                      │    Grafana   │  ← 統一可視化介面      │
+│                      └──────────────┘                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 各元件說明
+
+| 元件 | 用途 | 端點 |
+|------|------|------|
+| **Prometheus** | 從 Spring Boot `/actuator/prometheus` 抓取 Metrics | `prometheus.apps-crc.testing` |
+| **AlertManager** | 告警規則評估 + 通知路由（Email/Webhook） | `alertmanager.apps-crc.testing` |
+| **Grafana** | 統一儀表板（Prometheus + Loki datasource） | `grafana.apps-crc.testing` |
+| **OTel Collector** | 接收 OTLP/Zipkin traces，轉發到 Zipkin | `otel-collector:4317/4318` |
+| **Zipkin** | 分散式鏈路追蹤 UI | `zipkin.apps-crc.testing` |
+| **Loki** | 日誌儲存與查詢（輕量，替代 Elasticsearch） | `loki:3100`（Grafana 整合） |
+| **Promtail** | DaemonSet 日誌收集（從節點 /var/log/pods/ 收集） | — |
+
+> **EFK 替代說明**：EFK（Elasticsearch + Fluentd + Kibana）Manifest 位於  
+> `spring-cloud-stack/observability/05-efk-stack.yaml`，適用於正式環境。  
+> CRC 環境因 Elasticsearch 需要 2GB+ RAM，預設使用 **Loki + Promtail** 輕量替代方案。
+
+### Prometheus 告警規則（實際部署）
+
+```yaml
+# 已設定的告警（petclinic-alerts.yaml）：
+- ServiceDown       # 服務下線超過 1 分鐘 → critical
+- HighMemoryUsage   # JVM Heap > 80% → warning
+- HighErrorRate     # HTTP 5xx > 5% → warning
+```
+
+### Spring Boot 整合設定
+
+```yaml
+# Spring Boot 服務的 pod annotations（讓 Prometheus 自動發現）
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/actuator/prometheus"
+  prometheus.io/port: "8081"
+
+# Spring Boot application.yml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  tracing:
+    sampling:
+      probability: 1.0  # 100% 取樣（生產環境建議 0.1）
+  otlp:
+    tracing:
+      endpoint: http://otel-collector.observability:4318/v1/traces
+```
+
+### 截圖
+
+#### Prometheus — 指標查詢介面
+
+![Prometheus](screenshots/obs-prometheus.png)
+
+#### AlertManager — 告警管理
+
+![AlertManager](screenshots/obs-alertmanager.png)
+
+#### Grafana — 統一視覺化（含 Prometheus + Loki datasource）
+
+![Grafana](screenshots/obs-grafana.png)
+
+#### Zipkin — 分散式鏈路追蹤
+
+![Zipkin](screenshots/obs-zipkin.png)
+
+---
+
+## 18. 認證授權（AA）與流量管控
+
+> **分支**：`spring-cloud` | **Manifest**：`spring-cloud-stack/security/`
+
+### 架構圖
+
+```
+南北向（North-South）流量管控：
+─────────────────────────────────────────────────────────
+Internet
+  │ HTTPS（TLS Edge，OpenShift Route 終止）
+  ▼
+OpenShift HAProxy Router（ingress）
+  │ 速率限制（haproxy annotations）
+  │ HTTPS 強制重定向
+  ▼
+API Gateway（Spring Cloud Gateway）
+  │ OAuth2 Resource Server（驗證 Keycloak JWT）
+  │ Token Relay（轉傳 JWT 到下游服務）
+  ▼
+業務服務（customers / vets / visits）
+  │ 驗證 JWT roles（@PreAuthorize）
+  ▼
+回應
+
+東西向（East-West）流量管控：
+─────────────────────────────────────────────────────────
+業務服務 A
+  │ mTLS（cert-manager 發放，雙向憑證驗證）
+  ▼
+業務服務 B
+  │ NetworkPolicy（只允許 api-gateway 存取業務服務）
+  ▼
+限制：只有 Prometheus (observability namespace) 可抓 metrics
+```
+
+### Keycloak — OAuth2/OIDC 認證中心
+
+**已設定：**
+- Realm：`petclinic`
+- Client：`petclinic-gateway`（API Gateway 使用）
+- Client：`grafana`（Grafana SSO 使用）
+- Roles：`user`、`vet`、`admin`
+- Users：`alice`（user）、`bob`（vet）、`admin`（all roles）
+
+```bash
+# 取得 JWT Token（測試用）
+TOKEN=$(curl -s -X POST \
+  http://keycloak.apps-crc.testing/realms/petclinic/protocol/openid-connect/token \
+  -d "grant_type=password&client_id=petclinic-gateway&client_secret=petclinic-gateway-secret" \
+  -d "username=alice&password=alice123" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# 使用 JWT 存取 API
+curl -H "Authorization: Bearer $TOKEN" \
+  http://petclinic.apps-crc.testing/api/vet/vets
+```
+
+**Keycloak 登入頁：**
+
+![Keycloak](screenshots/obs-keycloak.png)
+
+### cert-manager — mTLS 東西向加密
+
+```bash
+# 安裝 cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+
+# 套用自簽 CA 與服務憑證
+oc apply -f spring-cloud-stack/security/01-cert-manager.yaml
+```
+
+**憑證策略：**
+- 自簽 CA（`petclinic-ca`）發放所有服務憑證
+- 每個服務有獨立 TLS Secret（`customers-service-tls` 等）
+- 憑證 90 天有效，cert-manager 自動在到期前 15 天更新
+- `usages: server auth + client auth` → 支援雙向 mTLS
+
+### NetworkPolicy — 東西向隔離
+
+```yaml
+# allow-gateway-to-services：只允許 api-gateway 存取業務服務
+# allow-prometheus-scrape：允許 observability namespace 抓取 metrics
+# allow-intra-petclinic：允許 petclinic namespace 內部通訊
+```
+
+### 南北向 Route 安全設定
+
+```yaml
+# OpenShift Route 安全 annotations
+annotations:
+  haproxy.router.openshift.io/redirect-to-https: "true"      # HTTP → HTTPS 強制
+  haproxy.router.openshift.io/rate-limit-connections: "true"  # 啟用速率限制
+  haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "100"
+  haproxy.router.openshift.io/rate-limit-connections.rate-tcp: "200"
+tls:
+  termination: edge
+  insecureEdgeTerminationPolicy: Redirect  # HTTP 重定向到 HTTPS
+```
+
+### 完整流量管控驗證清單
+
+| 機制 | 實作方式 | 狀態 |
+|------|---------|------|
+| N-S TLS 終止 | OpenShift Route Edge TLS | ✅ |
+| N-S 速率限制 | HAProxy annotations | ✅ |
+| N-S 認證 | Keycloak JWT（API Gateway OAuth2） | ✅ |
+| N-S 授權 | JWT roles（`@PreAuthorize`） | ✅ |
+| E-W 加密 | cert-manager mTLS | ✅（Manifest 完成） |
+| E-W 隔離 | NetworkPolicy | ✅ |
+| E-W Metrics 抓取 | 跨 Namespace NetworkPolicy | ✅ |
 
 ---
 

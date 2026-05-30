@@ -1,0 +1,199 @@
+# ============================================================
+# OpenTelemetry Collector + Zipkin
+# Spring Boot 服務透過 OTel Agent 自動發送 traces
+# OTel Collector 接收後轉發到 Zipkin
+# ============================================================
+
+# ── OpenTelemetry Collector ConfigMap ─────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  otel-collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      # 也接受 Zipkin 格式（Spring Cloud Sleuth 相容）
+      zipkin:
+        endpoint: 0.0.0.0:9411
+
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+      memory_limiter:
+        limit_mib: 200
+        spike_limit_mib: 50
+        check_interval: 5s
+      # 加入 Kubernetes 資源屬性
+      resource:
+        attributes:
+        - key: deployment.environment
+          value: development
+          action: upsert
+
+    exporters:
+      # 轉發到 Zipkin UI
+      zipkin:
+        endpoint: http://zipkin:9411/api/v2/spans
+      # 也輸出到 Prometheus（metrics）
+      prometheus:
+        endpoint: 0.0.0.0:8889
+      # Debug 輸出（生產環境關閉）
+      debug:
+        verbosity: normal
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      pprof: {}
+      zpages: {}
+
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp, zipkin]
+          processors: [memory_limiter, batch, resource]
+          exporters: [zipkin, debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
+---
+# ── OpenTelemetry Collector Deployment ───────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.99.0
+        args:
+        - --config=/etc/otel/otel-collector.yaml
+        ports:
+        - containerPort: 4317   # OTLP gRPC
+          name: otlp-grpc
+        - containerPort: 4318   # OTLP HTTP
+          name: otlp-http
+        - containerPort: 9411   # Zipkin receiver
+          name: zipkin
+        - containerPort: 8889   # Prometheus exporter
+          name: metrics
+        - containerPort: 13133  # Health check
+          name: health
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otel
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 13133
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: otel-collector-config
+          items:
+          - key: otel-collector.yaml
+            path: otel-collector.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  selector:
+    app: otel-collector
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+  - name: otlp-http
+    port: 4318
+    targetPort: 4318
+  - name: zipkin
+    port: 9411
+    targetPort: 9411
+  - name: metrics
+    port: 8889
+    targetPort: 8889
+---
+# ── Zipkin Deployment ─────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zipkin
+  namespace: observability
+  labels:
+    app: zipkin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zipkin
+  template:
+    metadata:
+      labels:
+        app: zipkin
+    spec:
+      containers:
+      - name: zipkin
+        image: openzipkin/zipkin:3.3
+        ports:
+        - containerPort: 9411
+        env:
+        - name: JAVA_OPTS
+          value: "-Xms64m -Xmx256m"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9411
+          initialDelaySeconds: 20
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zipkin
+  namespace: observability
+spec:
+  selector:
+    app: zipkin
+  ports:
+  - port: 9411
+    targetPort: 9411
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: zipkin
+  namespace: observability
+spec:
+  host: zipkin.apps-crc.testing
+  to:
+    kind: Service
+    name: zipkin
+  port:
+    targetPort: 9411
